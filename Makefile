@@ -27,7 +27,7 @@ COMMON_LIBS:= -lkernel32 -static-libgcc
 CAPI_LIB   := -L$(RUNTIME) -lsherpa-onnx-c-api
 GUI_LIBS   := $(CAPI_LIB) -lcomctl32 -lwinmm -lshell32 -luuid -lole32
 
-.PHONY: all deps shim say gui diag runtime test release upgrade clean distclean help
+.PHONY: all deps shim say gui diag server runtime test release upgrade clean distclean help
 
 all: runtime
 
@@ -75,6 +75,26 @@ $(SRC)/shim/imports.txt: $(SHERPA)/.complete $(SRC)/shim/scan_imports.py \
 	@echo "==> scanning upstream binaries for imports the shim must provide"
 	@$(PY) $(SRC)/shim/scan_imports.py $(SERPA_BINS) --out $@
 
+# ---------------------------------------------------------------- server
+SERVER_SRC := $(SRC)/server/tts_server.c $(SRC)/server/http_min.c \
+               $(SRC)/server/json_min.c $(SRC)/server/wav_writer.c \
+               $(SRC)/engine/tts_engine.c
+
+$(BUILD)/server/ui_html.h: $(SRC)/server/ui/index.html $(SRC)/server/ui/app.js \
+                           $(SRC)/server/embed_ui.py
+	@mkdir -p $(BUILD)/server
+	@$(PY) $(SRC)/server/embed_ui.py $(SRC)/server/ui $@
+
+$(RUNTIME)/tts_server.exe: $(SERVER_SRC) $(BUILD)/server/ui_html.h \
+                           $(SRC)/server/*.h $(SRC)/engine/*.h \
+                           $(RUNTIME)/sherpa-onnx-c-api.dll
+	@echo "==> compiling tts_server.exe"
+	@$(CC) -O2 -Wall -mwindows -municode -I$(SHERPA)/include -I$(SRC)/server -I$(SRC)/engine -I$(BUILD)/server \
+	      -o $@ $(SERVER_SRC) \
+	      $(CAPI_LIB) -lws2_32 -lwinmm -static-libgcc
+
+server: $(RUNTIME)/tts_server.exe
+
 # ---------------------------------------------------------------- front ends
 $(RUNTIME)/say.exe: $(SRC)/say/say.c $(RUNTIME)/sherpa-onnx-c-api.dll
 	@echo "==> compiling say.exe"
@@ -110,7 +130,8 @@ $(RUNTIME)/.patched: $(RUNTIME)/w7shim.dll $(SHERPA)/.complete
 	 done
 	@touch $@
 
-runtime: $(RUNTIME)/.patched $(RUNTIME)/say.exe $(RUNTIME)/tts_gui.exe $(RUNTIME)/diagnose.exe
+runtime: $(RUNTIME)/.patched $(RUNTIME)/say.exe $(RUNTIME)/tts_gui.exe \
+         $(RUNTIME)/diagnose.exe $(RUNTIME)/tts_server.exe
 	@echo "==> runtime ready in $(RUNTIME)/"
 
 # ---------------------------------------------------------------- test

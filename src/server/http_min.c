@@ -7,7 +7,8 @@
 
 #include "http_min.h"
 
-#define MAX_BODY (8 * 1024 * 1024)
+#define MAX_BODY      (8 * 1024 * 1024)
+#define MAX_HEADER_BYTES 16384
 
 const char *http_status_text(int status) {
     switch (status) {
@@ -83,88 +84,123 @@ int http_accept(int listener, HttpConn *out) {
     return 1;
 }
 
+/*
+ * Read one request.
+ *
+ * Deliberately simple: read until the header terminator, parse the request
+ * line and headers, then read exactly Content-Length bytes of body.  Only
+ * "\r\n\r\n" and "\n\n" are accepted as terminators - a search for "\n\n"
+ * alone silently fails on normal CRLF clients and closes the connection with
+ * no reply at all, which is exactly what happened before this was rewritten.
+ */
 int http_read_request(HttpConn *conn, HttpRequest *req) {
-    char head[8192];
+    char buf[MAX_HEADER_BYTES];
     size_t used = 0;
-    int chunked = 0;
+    size_t hdr_end = 0;      /* offset just past the terminator */
+    char *headers;
+    char *body_start;
 
     memset(req, 0, sizeof(*req));
-    req->body = NULL;
-    req->body_len = 0;
     req->content_length = -1;
 
-    /* Read until the blank line ending the header block. */
     for (;;) {
         int n;
-        if (used + 1 >= sizeof(head)) return -1;   /* header block too large */
-        n = recv(conn->sock, head + used, (int)(sizeof(head) - used - 1), 0);
+        if (used + 1 >= sizeof(buf)) return -1;    /* header block too large */
+        n = recv(conn->sock, buf + used, (int)(sizeof(buf) - used - 1), 0);
         if (n == 0) return (used == 0) ? 0 : -1;
         if (n < 0) return -1;
         used += (size_t)n;
-        head[used] = 0;
-        if (strstr(head, "\r\n\r\n") || strstr(head, "\n\n")) break;
-        if (n == 0) break;
+        buf[used] = 0;
+
+        {
+            char *crlf = strstr(buf, "\r\n\r\n");
+            char *lf = strstr(buf, "\n\n");
+            if (crlf && (!lf || crlf <= lf)) hdr_end = (size_t)(crlf - buf) + 4;
+            else if (lf) hdr_end = (size_t)(lf - buf) + 2;
+            if (hdr_end) break;
+        }
     }
 
+    /* Split the header block into individual lines. */
+    headers = (char *)malloc(hdr_end + 1);
+    if (!headers) return -1;
+    memcpy(headers, buf, hdr_end);
+    headers[hdr_end] = 0;
+
+    /*
+     * Request line: parse from a copy, so the original block keeps its CRLFs
+     * for the header walk below.  Writing a NUL over the first CRLF earlier
+     * made the header loop stop immediately, Content-Length stayed -1 and the
+     * body was never read.
+     */
     {
-        char *line_end = strstr(head, "\r\n");
-        char *body_start;
-        int scanned = 0;
-        char *p;
-
-        if (line_end) { *line_end = 0; body_start = strstr(line_end + 2, "\r\n\r\n"); }
-        else { line_end = strchr(head, '\n'); if (line_end) *line_end = 0; body_start = strstr(head, "\n\n"); }
-        if (!line_end) return -1;
-        body_start = strstr(head, "\n\n");
-        if (!body_start) return -1;
-
-        /* Request line: METHOD SP PATH SP VERSION */
-        if (sscanf(head, "%15s %2047s", req->method, req->path) < 2) return -1;
-        {
+        char line[HTTP_MAX_PATH + 32];
+        char *eol = strpbrk(headers, "\r\n");
+        size_t len;
+        if (eol) *eol = 0;
+        snprintf(line, sizeof(line), "%s", headers);
+        if (eol) *eol = '\r';   /* restore for the header walk */
+        if (sscanf(line, "%15s %2047s", req->method, req->path) < 2) {
+            free(headers);
+            return -1;
+        }
+        len = strlen(req->path);
+        if (len && req->path[len - 1] == '?') {
+            req->path[len - 1] = 0;
+        } else {
             char *q = strchr(req->path, '?');
             if (q) {
                 *q = 0;
-                strncpy(req->query, q + 1, sizeof(req->query) - 1);
-                req->query[sizeof(req->query) - 1] = 0;
+                snprintf(req->query, sizeof(req->query), "%s", q + 1);
             }
         }
+    }
 
-        /* Headers. */
-        p = line_end + 1;
+    /* Headers: copy each line out before comparing, so nothing is clobbered. */
+    {
+        char line[512];
+        char *p = strpbrk(headers, "\r\n");
         while (p && *p) {
-            char *eol = strpbrk(p, "\r\n");
-            if (eol) *eol = 0;
-            if (_strnicmp(p, "Content-Length:", 15) == 0) {
-                req->content_length = atoi(p + 15);
-            } else if (_strnicmp(p, "Transfer-Encoding:", 18) == 0) {
-                if (strstr(p + 18, "chunked")) chunked = 1;
+            char *eol;
+            size_t len;
+            p += (*p == '\r' && p[1] == '\n') ? 2 : 1;
+            if (!*p) break;
+            eol = strpbrk(p, "\r\n");
+            len = eol ? (size_t)(eol - p) : strlen(p);
+            if (len >= sizeof(line)) len = sizeof(line) - 1;
+            memcpy(line, p, len);
+            line[len] = 0;
+            if (_strnicmp(line, "Content-Length:", 15) == 0) {
+                req->content_length = atoi(line + 15);
             }
-            if (!eol) break;
-            p = eol + ((eol[0] == '\r' && eol[1] == '\n') ? 2 : 1);
-            scanned = (p < body_start);
-            (void)scanned;
-            if (p >= body_start) break;
+            p = eol;
         }
-        (void)chunked;
+    }
+    free(headers);
 
-        if (req->content_length > MAX_BODY) return -1;
-        if (req->content_length > 0) {
-            size_t have = used - (size_t)((body_start + 2) - head);
-            size_t need;
-            if (have > (size_t)req->content_length) have = (size_t)req->content_length;
-            req->body = (char *)malloc((size_t)req->content_length + 1);
-            if (!req->body) return -1;
-            memcpy(req->body, body_start + 2, have);
-            need = (size_t)req->content_length - have;
-            while (need > 0) {
-                int n = recv(conn->sock, req->body + have, (int)need, 0);
-                if (n <= 0) { free(req->body); req->body = NULL; return -1; }
-                have += (size_t)n;
-                need -= (size_t)n;
+    if (req->content_length > MAX_BODY) return -1;
+
+    if (req->content_length > 0) {
+        size_t have = used - hdr_end;
+        size_t need;
+        if (have > (size_t)req->content_length) have = (size_t)req->content_length;
+        req->body = (char *)malloc((size_t)req->content_length + 1);
+        if (!req->body) return -1;
+        body_start = buf + hdr_end;
+        memcpy(req->body, body_start, have);
+        need = (size_t)req->content_length - have;
+        while (need > 0) {
+            int n = recv(conn->sock, req->body + have, (int)need, 0);
+            if (n <= 0) {
+                free(req->body);
+                req->body = NULL;
+                return -1;
             }
-            req->body[have] = 0;
-            req->body_len = have;
+            have += (size_t)n;
+            need -= (size_t)n;
         }
+        req->body[have] = 0;
+        req->body_len = have;
     }
     return 1;
 }

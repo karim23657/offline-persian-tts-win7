@@ -40,7 +40,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "sherpa-onnx/c-api/c-api.h"
 #include "tts_engine.h"
 #include "http_min.h"
 #include "json_min.h"
@@ -48,6 +47,7 @@
 #include "ui_html.h"
 
 #define MAX_PATHLEN 4096
+#define MAX_ARGS    16
 
 static int   g_port = 8756;
 static char  g_host[64] = "127.0.0.1";
@@ -171,28 +171,25 @@ static int resolve_model(const char *want, wchar_t *out, size_t cap) {
 
 typedef struct {
     WavWriter wav;
-    double seconds;
+    int sample_rate;
 } SynthCtx;
 
-/* Called by the engine as samples are produced. */
-static int32_t WINAPI on_samples(const float *samples, int32_t n, void *arg) {
-    SynthCtx *ctx = (SynthCtx *)arg;
-    wav_push_samples(&ctx->wav, samples, (size_t)n);
-    return 1;   /* keep going */
+static void on_samples(const float *samples, int count, void *user) {
+    SynthCtx *ctx = (SynthCtx *)user;
+    wav_push_samples(&ctx->wav, samples, (size_t)count);
 }
 
 /* Build the WAV for `text` and return it, or NULL with an error message. */
 static unsigned char *synthesize(const char *text, const wchar_t *model_dir,
-                                 float speed, int sid, float length_scale,
-                                 size_t *out_len, char *error, size_t errlen) {
+                                 float speed, int sid, size_t *out_len,
+                                 char *error, size_t errlen) {
     TtsEngine *engine;
     wchar_t werr[512];
-    SherpaOnnxGenerationConfig cfg;
-    const SherpaOnnxGeneratedAudio *audio;
     SynthCtx ctx;
     const unsigned char *hdr;
     size_t hdr_len = 0;
     unsigned char *result;
+    int n_samples = 0;
 
     engine = TtsEngineAcquire(model_dir, werr, sizeof(werr) / sizeof(werr[0]));
     if (!engine) {
@@ -200,29 +197,25 @@ static unsigned char *synthesize(const char *text, const wchar_t *model_dir,
         return NULL;
     }
 
-    memset(&cfg, 0, sizeof(cfg));
-    cfg.sid = sid;
-    cfg.speed = speed;
-    cfg.silence_scale = 0.2f;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.sample_rate = TtsEngineSampleRate(model_dir);
+    if (ctx.sample_rate <= 0) ctx.sample_rate = 22050;
+    wav_init(&ctx.wav, ctx.sample_rate);
 
-    wav_init(&ctx.wav, engine->sample_rate);
-
-    audio = SherpaOnnxOfflineTtsGenerateWithConfig(engine->tts, text, &cfg,
-                                                  on_samples, &ctx);
-    TtsEngineTouch(engine);
-    /* Release the generation lock we have held since Acquire. */
-    TtsEngineRelease();
-
-    if (!audio || audio->n <= 0) {
-        snprintf(error, errlen, "the model produced no audio for this text");
+    if (!TtsEngineGenerate(engine, text, speed, sid, on_samples, &ctx,
+                           &n_samples, error, errlen)) {
         wav_free(&ctx.wav);
-        if (audio) SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
+        TtsEngineTouch(engine);
+        TtsEngineRelease();
         return NULL;
     }
+    TtsEngineTouch(engine);
+    TtsEngineRelease();   /* release the generation lock Acquire took */
+
     if (ctx.wav.len == 0) {
-        /* The callback did not fire (no callback support in this build): fall
-           back to the complete buffer so we still return audio. */
-        wav_push_samples(&ctx.wav, audio->samples, (size_t)audio->n);
+        snprintf(error, errlen, "no audio samples were produced");
+        wav_free(&ctx.wav);
+        return NULL;
     }
 
     /* Header last: it now carries the exact data size. */
@@ -236,7 +229,6 @@ static unsigned char *synthesize(const char *text, const wchar_t *model_dir,
         snprintf(error, errlen, "out of memory building the response");
     }
     wav_free(&ctx.wav);
-    SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
     return result;
 }
 
@@ -364,9 +356,11 @@ static void handle_warmup(HttpConn *conn, const HttpRequest *req) {
 
 static void handle_synthesize(HttpConn *conn, const HttpRequest *req) {
     char text[65536];
+    text[0] = 0;   /* never pass uninitialised memory to the engine */
     char model[512] = "";
+    model[0] = 0;
     char error[512] = "";
-    double speed = 1.0, length_scale = 1.0;
+    double speed = -1.0;
     int sid = 0;
     wchar_t model_dir[MAX_PATHLEN];
     unsigned char *wav;
@@ -375,10 +369,9 @@ static void handle_synthesize(HttpConn *conn, const HttpRequest *req) {
 
     /* Text comes from the body for POST; the query string is a convenience for
        GET (so <audio src="..."> works) but is capped by the URL length. */
-    if (!json_get_string(json, "text", text, sizeof(text)) &&
-        req->query && *req->query) {
+    if (!json_get_string(json, "text", text, sizeof(text)) && req->query[0]) {
         /* crude query parsing: text=...&model=... */
-        char q[4096];
+        char q[2048];
         char *tok, *save = NULL;
         strncpy(q, req->query, sizeof(q) - 1);
         q[sizeof(q) - 1] = 0;
@@ -386,40 +379,54 @@ static void handle_synthesize(HttpConn *conn, const HttpRequest *req) {
             char *eq = strchr(tok, '=');
             char *val;
             int len;
-            static char decoded[8192];
+            static char decoded[1024];
             if (!eq) continue;
             *eq = 0;
             val = eq + 1;
             len = url_decode(val, decoded, sizeof(decoded));
-            if (!strcmp(tok, "text")) strncpy(text, decoded, sizeof(text) - 1);
-            else if (!strcmp(tok, "model")) strncpy(model, decoded, sizeof(model) - 1);
+            /* decoded is bounded to 1024, so these always fit their targets. */
+            if (!strcmp(tok, "text")) snprintf(text, sizeof(text), "%s", decoded);
+            else if (!strcmp(tok, "model")) snprintf(model, sizeof(model), "%s", decoded);
             else if (!strcmp(tok, "sid")) sid = atoi(decoded);
             else if (!strcmp(tok, "speed")) speed = atof(decoded);
-            else if (!strcmp(tok, "length_scale")) length_scale = atof(decoded);
             (void)len;
         }
     }
     if (!text[0]) { send_json_error(conn, 400, "no text supplied"); return; }
     json_get_string(json, "model", model, sizeof(model));
-    if (!json_get_double(json, "speed", &speed)) {
-        if (req->query) {
-            /* already parsed above */
-        } else {
-            speed = 1.0;
+    /* A GET request may already have taken speed from the query string, so only
+       fall back to 1.0 when neither source supplied a usable value. */
+    {
+        double body_speed = -1.0;
+        if (json_get_double(json, "speed", &body_speed) && body_speed > 0.3) {
+            speed = body_speed;
         }
+        if (speed < 0.3) speed = 1.0;
     }
-    if (!json_get_double(json, "length_scale", &length_scale)) length_scale = 1.0;
     if (!json_get_int(json, "sid", &sid)) sid = 0;
     if (speed <= 0.3 || speed > 3.0) speed = 1.0;
-    if (length_scale <= 0.3 || length_scale > 3.0) length_scale = 1.0;
 
     if (!resolve_model(model, model_dir, MAX_PATHLEN)) {
         send_json_error(conn, 404, "no model installed; run scripts\\get_model.cmd gyro");
         return;
     }
 
-    wav = synthesize(text, model_dir, (float)speed, sid, (float)length_scale,
-                     &wav_len, error, sizeof(error));
+    if (getenv("WIN7TTS_DEBUG")) {
+        /* Show exactly what the engine will see, so a wrong-encoding bug is
+           obvious instead of looking like "the model is bad". */
+        char dump[512];
+        int i, n = (int)strlen(text);
+        if (n > 120) n = 120;
+        for (i = 0; i < n; ++i) {
+            unsigned char c = (unsigned char)text[i];
+            dump[i] = (c >= 0x20 && c < 0x7f) ? (char)c : '?';
+        }
+        dump[n] = 0;
+        logf_("  text(%d bytes) = \"%s\"", (int)strlen(text), dump);
+    }
+
+    wav = synthesize(text, model_dir, (float)speed, sid, &wav_len,
+                     error, sizeof(error));
     if (!wav) {
         send_json_error(conn, 500, error);
         return;
@@ -458,6 +465,12 @@ static void route(HttpConn *conn, HttpRequest *req) {
                        win7_tts_ui_html, win7_tts_ui_html_len);
         return;
     }
+    if (strcmp(req->path, "/app.js") == 0) {
+        if (!is_get) { http_send_status(conn, 405, "text/plain", "GET only"); return; }
+        http_send_full(conn, 200, "application/javascript; charset=utf-8",
+                       win7_tts_ui_app_js, win7_tts_ui_app_js_len);
+        return;
+    }
     http_send_status(conn, 404, "text/plain", "no such endpoint");
 }
 
@@ -480,9 +493,8 @@ static void serve_connection(int listener) {
     rc = http_read_request(&conn, &req);
     if (rc == 1) {
         InterlockedIncrement(&g_requests);
-        logf_("  %s %s%s", req.method, req.path,
-              req.body_len ? sprintf(req.query, "%s (%lu bytes)", req.query,
-                                     (unsigned long)req.body_len) : "");
+        logf_("  %s %s (%lu bytes)", req.method, req.path,
+              (unsigned long)req.body_len);
         route(&conn, &req);
     }
     http_free_request(&req);
@@ -490,27 +502,75 @@ static void serve_connection(int listener) {
     closesocket(conn.sock);
 }
 
+/*
+ * Split a wide command line into argv-style pointers.  Returns the count.
+ * Handles quoted arguments and backslash-escaped quotes.
+ */
+static int split_wide_args(wchar_t **out, int max_args) {
+    wchar_t *p = GetCommandLineW();
+    int n = 0;
+
+    if (*p == L'"') {                       /* skip the quoted program path */
+        p++;
+        while (*p && *p != L'"') p++;
+        if (*p) p++;
+    } else {
+        while (*p && *p != L' ') p++;
+    }
+    while (*p && n < max_args - 1) {
+        while (*p == L' ' || *p == L'\t') p++;
+        if (!*p) break;
+        out[n++] = p;
+        if (*p == L'"') {
+            p++;
+            while (*p && *p != L'"') {
+                if (*p == L'\\' && p[1] == L'"') p++;
+                p++;
+            }
+            if (*p) p++;
+        } else {
+            while (*p && *p != L' ' && *p != L'\t') p++;
+        }
+        if (*p) {
+            *p = L'\0';
+            p++;
+        }
+    }
+    out[n] = NULL;
+    return n;
+}
+
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show) {
     int i, port = 0, listener;
     wchar_t exe[MAX_PATHLEN], *slash;
-    (void)inst; (void)prev; (void)show;
+    wchar_t *args[MAX_ARGS];
+    int argc;
+    (void)inst; (void)prev; (void)show; (void)cmdline;
 
     g_start = GetTickCount();
     TtsEngineInit();
 
-    for (i = 1; i < __argc; ++i) {
-        if (!wcscmp(__argv[i], L"--port") && i + 1 < __argc) {
-            g_port = _wtoi(__argv[++i]);
-        } else if (!wcscmp(__argv[i], L"--host") && i + 1 < __argc) {
-            WideCharToMultiByte(CP_UTF8, 0, __argv[++i], -1, g_host, sizeof(g_host),
+    /*
+     * Split the raw wide command line ourselves.  MinGW does not reliably
+     * export __wargc/__wargv, and GetCommandLineW is the one source of truth.
+     */
+    argc = split_wide_args(args, MAX_ARGS);
+    /* split_wide_args consumes the program path, so args[0] is the first
+       *option* -- start at 0, not 1. */
+
+    for (i = 0; i < argc; ++i) {
+        if (!wcscmp(args[i], L"--port") && i + 1 < argc) {
+            g_port = _wtoi(args[++i]);
+        } else if (!wcscmp(args[i], L"--host") && i + 1 < argc) {
+            WideCharToMultiByte(CP_UTF8, 0, args[++i], -1, g_host, sizeof(g_host),
                                 NULL, NULL);
-        } else if (!wcscmp(__argv[i], L"--models") && i + 1 < __argc) {
-            wcscpy(g_models_dir, __argv[++i]);
-        } else if (!wcscmp(__argv[i], L"--preload")) {
+        } else if (!wcscmp(args[i], L"--models") && i + 1 < argc) {
+            wcscpy(g_models_dir, args[++i]);
+        } else if (!wcscmp(args[i], L"--preload")) {
             g_preload = 1;
-        } else if (!wcscmp(__argv[i], L"--quiet")) {
+        } else if (!wcscmp(args[i], L"--quiet")) {
             g_quiet = 1;
-        } else if (!wcscmp(__argv[i], L"--help") || !wcscmp(__argv[i], L"-h")) {
+        } else if (!wcscmp(args[i], L"--help") || !wcscmp(args[i], L"-h")) {
             wprintf(L"tts_server - local web interface for win7-tts\n\n"
                      L"  --port <n>     port to listen on (default 8756)\n"
                      L"  --host <a>     address to bind (default 127.0.0.1)\n"

@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "tts_engine.h"
 #include "sherpa-onnx/c-api/c-api.h"
@@ -294,6 +295,76 @@ int TtsEngineSampleRate(const wchar_t *model_dir) {
     }
     LeaveCriticalSection(&g_cache.cs);
     return rate;
+}
+
+/* Context for the sherpa-onnx callback trampoline. */
+typedef struct {
+    TtsSampleSink sink;
+    void *user;
+    int called;          /* did the engine invoke the callback at all? */
+} GenCtx;
+
+/*
+ * Progress callback.  The signature has FOUR parameters - samples, count,
+ * progress and the user pointer.  A three-argument function compiles with only
+ * a warning here and then misbehaves, because the progress float is read from
+ * where the argument pointer should be.
+ */
+static int32_t WINAPI engine_on_samples(const float *samples, int32_t n,
+                                        float progress, void *arg) {
+    GenCtx *ctx = (GenCtx *)arg;
+    (void)progress;
+    if (ctx) {
+        ctx->called = 1;
+        if (ctx->sink) ctx->sink(samples, (int)n, ctx->user);
+    }
+    return 1;
+}
+
+int TtsEngineGenerate(TtsEngine *engine, const char *text, float speed, int sid,
+                      TtsSampleSink sink, void *user, int *out_samples,
+                      char *err, size_t errlen) {
+    SherpaOnnxGenerationConfig cfg;
+    const SherpaOnnxGeneratedAudio *audio;
+    GenCtx ctx;
+    int rc = 0;
+
+    if (!engine || !engine->tts) {
+        snprintf(err, errlen, "engine is not loaded");
+        return 0;
+    }
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.sid = sid;
+    cfg.speed = speed;
+    cfg.silence_scale = 0.2f;
+
+    ctx.sink = sink;
+    ctx.user = user;
+    ctx.called = 0;
+
+    audio = SherpaOnnxOfflineTtsGenerateWithConfig(engine->tts, text, &cfg,
+                                                  engine_on_samples, &ctx);
+    if (!audio || audio->n <= 0) {
+        snprintf(err, errlen, "the model produced no audio for this text");
+        if (audio) SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
+        return 0;
+    }
+    /*
+     * If the engine never invoked the callback, push the whole buffer so the
+     * caller still gets audio.  Guarding on `called` matters: pushing
+     * unconditionally would append the same samples twice.
+     */
+    if (sink && audio->n > 0 && !ctx.called) {
+        sink(audio->samples, (int)audio->n, user);
+    }
+    if (out_samples) *out_samples = audio->n;
+    if (getenv("WIN7TTS_DEBUG")) {
+        fprintf(stderr, "    engine produced %d samples, callback %s\n",
+                audio->n, ctx.called ? "fired" : "never fired");
+    }
+    rc = 1;
+    SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
+    return rc;
 }
 
 void TtsEngineShutdown(void) {

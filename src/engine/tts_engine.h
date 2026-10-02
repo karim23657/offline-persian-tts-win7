@@ -63,6 +63,21 @@ int TtsEngineIsLoaded(const wchar_t *model_dir);
 /* Sample rate of a resident model, or 0 when it is not loaded. */
 int TtsEngineSampleRate(const wchar_t *model_dir);
 
+/*
+ * Sink for generated samples, so callers (e.g. the WAV writer) can consume
+ * audio as it is produced instead of only at the end.
+ */
+typedef void (*TtsSampleSink)(const float *samples, int count, void *user);
+
+/*
+ * Synthesise UTF-8 `text`.  Samples are pushed to `sink` as they arrive.
+ * Fills *out_len with the sample count.  Returns 1 on success, 0 on failure
+ * with a UTF-8 message in `err`.
+ */
+int TtsEngineGenerate(TtsEngine *engine, const char *text, float speed, int sid,
+                      TtsSampleSink sink, void *user, int *out_samples,
+                      char *err, size_t errlen);
+
 #ifdef __cplusplus
 }
 #endif
