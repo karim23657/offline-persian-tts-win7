@@ -64,6 +64,7 @@ sherpa-onnx's C API directly and hands the engine **UTF-8**, which is what that
 API documents. Persian works regardless of the system code page, and because the
 model is loaded once it is also markedly faster than launching the engine per
 sentence.
+
 ---
 
 ## Quick start
