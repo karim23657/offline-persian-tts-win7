@@ -1,0 +1,7 @@
+# The .cmd scripts must stay CRLF and must NOT gain a UTF-8 BOM: cmd mis-parses
+# a batch file whose first bytes are the BOM ("n++@echo off"). They are ASCII on
+# purpose - Persian text reaches them through a UTF-8 file or chcp 65001.
+*.cmd   text eol=crlf working-tree-encoding=ISO-8859-1
+*.S     text eol=lf
+*.py    text eol=lf
+*.md    text eol=lf

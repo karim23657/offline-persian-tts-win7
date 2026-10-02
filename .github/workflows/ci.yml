@@ -1,0 +1,98 @@
+name: build
+
+# Two jobs on purpose:
+#   build-and-test  compiles everything and runs the shim self-test under Wine
+#                   configured as Windows 7.  This is the gate.
+#   package         produces the release archives from a clean tree.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++-mingw-w64-x86-64 wine64 xvfb x11-utils zip
+
+      - name: Check dependencies
+        run: make deps
+
+      # Wine exports the very Windows 8+ APIs the shim replaces, so a plain
+      # Wine run would never execute the fallbacks.  The self-test works around
+      # that by resolving each fallback by name through the
+      # win7shim_get_fallback hook.  See win7.md.
+      - name: Create a Windows 7 Wine prefix
+        run: |
+          printf '#!/bin/sh\nexec /usr/lib/wine/wine64 "$@"\n' | sudo tee /usr/local/bin/wine >/dev/null
+          sudo chmod +x /usr/local/bin/wine
+          export WINEPREFIX=/tmp/wp7 WINEDEBUG=-all
+          wineboot -i
+          wine reg add 'HKCU\Software\Wine' /v Version /d win7 /f
+          wine reg add 'HKLM\Software\Microsoft\Windows NT\CurrentVersion' \
+              /v CurrentVersion /d '6.1' /f
+          wine cmd /c ver
+
+      - name: Build
+        run: make
+
+      - name: Shim self-test
+        run: make test
+
+      - name: Smoke test - synthesise Persian audio
+        run: |
+          set -e
+          python3 - <<'PY'
+          open('smoke.txt', 'w', encoding='utf-8').write('سلام دنیا')
+          PY
+          export WINEPREFIX=/tmp/wp7 WINEDEBUG=-all
+          wine runtime/say.exe --model models/vits-piper-fa_IR-gyro-medium \
+              --out smoke.wav --text-file smoke.txt
+          python3 - <<'PY'
+          import wave
+          w = wave.open('smoke.wav')
+          dur = w.getnframes() / float(w.getframerate())
+          assert w.getframerate() == 22050, w.getframerate()
+          assert dur > 1.0, 'suspiciously short audio: %r' % dur
+          print('OK: %.2f s at %d Hz' % (dur, w.getframerate()))
+          PY
+
+      - name: Verify no Windows 8+ DLL imports remain
+        run: |
+          fail=0
+          for f in runtime/*.dll runtime/*.exe; do
+            if objdump -p "$f" | grep -q 'DLL Name: dxgi.dll'; then
+              echo "::error::$f still imports dxgi.dll"; fail=1
+            fi
+            if objdump -p "$f" | grep -q 'DLL Name: api-ms-win-core-path-l1-1-0.dll'; then
+              echo "::error::$f still imports api-ms-win-core-path-l1-1-0.dll"; fail=1
+            fi
+          done
+          [ $fail -eq 0 ] && echo "all imports redirected"
+          exit $fail
+
+  package:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get install -y --no-install-recommends g++-mingw-w64-x86-64 zip
+      # The model is not committed (79 MB), so the "with model" archive is
+      # produced by a separate manual run that has it available; CI builds the
+      # slim archive and uploads it automatically.
+      - name: Build slim archive
+        run: |
+          python3 scripts/make_slim_zip.py dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win7-tts-runtime-only
+          path: dist/win7-tts-runtime-only.zip

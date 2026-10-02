@@ -1,0 +1,62 @@
+name: Bug report
+description: Something does not work - especially a crash
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## First: please run the diagnostic
+
+        Copy this output into your report. It turns a vague "it crashes" into a
+        specific cause, and it is the fastest way to get a fix.
+
+        ```bat
+        scripts\diagnose.cmd
+        ```
+
+        If it reports "NO MODEL FOUND", install one first with
+        `scripts\get_model.cmd gyro`, then run it again.
+  - type: textarea
+    id: diagnostic
+    attributes:
+      label: Output of scripts\diagnose.cmd
+      description: The whole thing, including the exit code and "What the codes mean".
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version and CPU
+      placeholder: "Windows 7 SP1 x64, Intel Core i5-2500"
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What did you do, and what happened?
+      description: The exact command, and the full error text or dialog.
+    validations:
+      required: true
+  - type: dropdown
+    id: entry
+    attributes:
+      label: How were you running it?
+      options:
+        - scripts\gui.cmd (native GUI)
+        - scripts\say.cmd
+        - scripts\say_batch.cmd
+        - scripts\get_model.cmd
+        - python scripts\gui.py
+        - other
+    validations:
+      required: true
+  - type: input
+    id: archive
+    attributes:
+      label: Which archive, and where from?
+      description: win7-tts.zip or win7-tts-runtime-only.zip; a release tag or URL.
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: Prerequisites
+      options:
+        - label: I installed the Visual C++ 2015-2022 x64 redistributable.
+        - label: I ran scripts\diagnose.cmd and pasted the output above.
