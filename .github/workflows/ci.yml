@@ -20,8 +20,11 @@ jobs:
       - name: Install build and test dependencies
         run: |
           sudo apt-get update
+          # `wine` (not just `wine64`) is required: it is the package that ships
+          # wineboot/winecfg, which the Win7 prefix step below calls.  With only
+          # wine64 installed the job died at "wineboot: command not found".
           sudo apt-get install -y --no-install-recommends \
-            g++-mingw-w64-x86-64 wine64 xvfb x11-utils zip
+            g++-mingw-w64-x86-64 wine wine64 xvfb x11-utils zip
 
       - name: Check dependencies
         run: make deps
