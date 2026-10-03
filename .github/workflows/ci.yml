@@ -74,8 +74,13 @@ jobs:
       - name: Smoke test - synthesise Persian audio
         run: |
           set -e
+          # A longer phrase on purpose: the point is to catch truncated or
+          # silent output, and a two-word sentence legitimately lasts well
+          # under a second (سلام دنیا measures ~0.8 s), which tripped a >1 s
+          # assertion on a perfectly good build.
           python3 - <<'PY'
-          open('smoke.txt', 'w', encoding='utf-8').write('سلام دنیا')
+          text = 'سلام دنیا. این یک آزمایش است برای اطمینان از کارکرد درست موتور تبدیل متن به گفتار.'
+          open('smoke.txt', 'w', encoding='utf-8').write(text)
           PY
           wine runtime/say.exe --model models/vits-piper-fa_IR-gyro-medium \
               --out smoke.wav --text-file smoke.txt
@@ -83,9 +88,17 @@ jobs:
           import wave
           w = wave.open('smoke.wav')
           dur = w.getnframes() / float(w.getframerate())
+          # Avoid audioop: it is deprecated in 3.11 and removed in 3.13, and
+          # the runner's python version can move under us.
+          frames = w.readframes(w.getnframes())
+          width = w.getsampwidth()
+          peak = max(abs(int.from_bytes(frames[i:i+width], 'little', signed=True))
+                     for i in range(0, len(frames) - width + 1, width))
           assert w.getframerate() == 22050, w.getframerate()
           assert dur > 1.0, 'suspiciously short audio: %r' % dur
-          print('OK: %.2f s at %d Hz' % (dur, w.getframerate()))
+          # Silence would still be "long enough", so check it actually has sound.
+          assert peak > 1000, 'output is silent (peak %d)' % peak
+          print('OK: %.2f s at %d Hz, peak %d' % (dur, w.getframerate(), peak))
           PY
 
       - name: Verify no Windows 8+ DLL imports remain
