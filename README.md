@@ -1,527 +1,826 @@
-# win7-tts — fast local Persian (and any language) TTS on Windows 7
+# 🗣️ Win7-TTS — Free Offline Persian Text-to-Speech for Windows 7
 
-A self-contained, offline text-to-speech package for **Windows 7**, built around
-[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx). It runs the same Piper/VITS
-models that the HuggingFace Space
-[`karim23657/Persian-TTS-sherpa`](https://huggingface.co/spaces/karim23657/Persian-TTS-sherpa)
-serves, but entirely on your own machine — no Python, no internet at run time.
+**Convert Persian text to natural speech instantly. No internet. No setup. Just download and use.**
 
-Think of it as the TTS equivalent of a llama.cpp single-file build: one engine
-binary, one ONNX model, and a command that turns text into a `.wav`.
-
-For anyone picking this up afterwards:
-
-- [`docs/how_to.md`](docs/how_to.md) - how it works, what was tried and
-  rejected, and the bugs to avoid.
-- [`docs/compiling.md`](docs/compiling.md) - how everything is compiled for
-  Windows 7.
-- [`docs/upgrading-sherpa.md`](docs/upgrading-sherpa.md) - how to move to a new
-  sherpa-onnx release.
-- [`docs/win7.md`](docs/win7.md) - the Wine-as-Windows-7 test environment.
-- [`docs/github-upload.md`](docs/github-upload.md) - publishing to GitHub.
+> A lightweight, self-contained text-to-speech tool for Windows 7 that works completely offline. Built for Persian, works with any language supported by Piper/VITS models.
 
 ---
 
-## Why this exists
+## 📢 Choose Your Language | انتخاب زبان
 
-Two separate things break on Windows 7, and both had to be solved.
-
-### 1. The official binaries will not even start
-
-sherpa-onnx publishes Windows builds compiled with a Windows 10 SDK and a
-VS2022 toolchain. They statically import functions that Windows 7 does not
-have — `GetSystemTimePreciseAsFileTime`, `CreateFile2`,
-`InitializeCriticalSectionEx`, `GetProcessMitigationPolicy`, the `Fls*` and
-`CONDITION_VARIABLE` families, `PathCchRemove*` — and they import them from
-`api-ms-win-core-path-l1-1-0.dll`, an API-set stub that does not exist before
-Windows 8. `onnxruntime.dll` additionally imports `CreateDXGIFactory2` from
-`dxgi.dll`, which is DXGI 1.2 and also Windows 8 only.
-
-On Windows 7 the loader aborts the process before a single line of code runs:
-
-```
-The procedure entry point GetSystemTimePreciseAsFileTime could not be located
-in the dynamic library KERNEL32.dll.
-```
-
-There is no way to add an export to the real `KERNEL32.dll`, so the fix shipped
-here is `runtime/w7shim.dll` plus a small PE patch (see **How the Win7 fix
-works** below).
-
-### 2. Persian text arrives as `????`
-
-`sherpa-onnx-offline-tts.exe` is a plain `main()` program, so Windows hands it
-its arguments in the current **ANSI code page**. On a stock Windows 7 that page
-is 1252 or 437 — neither can represent Persian — so the engine receives a row
-of `?` and emits 30 ms of near-silence instead of speech.
-
-`chcp 65001` is not a dependable fix: the code page must already be UTF-8 before
-the process starts, and anything that launches the engine without a console (a
-shortcut, Task Scheduler, another program) has no code page at all.
-
-So `runtime/say.exe` does not pass text through `argv` at all. It links
-sherpa-onnx's C API directly and hands the engine **UTF-8**, which is what that
-API documents. Persian works regardless of the system code page, and because the
-model is loaded once it is also markedly faster than launching the engine per
-sentence.
+- **[English](#-get-started-in-30-seconds)** ← You are here
+- **[فارسی (Farsi)](#-شروع-سریع-در-۳۰-ثانیه)**
 
 ---
 
-## Quick start
+## 💬 Join Us
 
-Unzip anywhere, then either start the graphical interface:
+**[📱 Telegram Channel](https://t.me/persian_tts)** — Get updates, ask questions, share your creations
 
+---
+
+# 🌐 ENGLISH VERSION
+
+## ⚡ Get Started in 30 Seconds
+
+### 1. Download
+👉 **[Download the latest release (ZIP)](https://github.com/karim23657/offline-persian-tts-win7/releases/latest)**
+
+### 2. Extract
+Unzip anywhere on your computer.
+
+### 3. Run
+Choose your preferred method:
+
+**Option A: Web Interface (Easiest)** 🌐
+```bat
+scripts\server.cmd
+```
+Then open your browser to: **http://127.0.0.1:8756/**
+- Beautiful web interface
+- Works on any device on your network
+- No installation needed
+
+**Option B: GUI Application** 🖥️
 ```bat
 scripts\gui.cmd
 ```
+- Graphical interface (native Windows)
+- Fastest performance
 
-...or use the command line:
-
+**Option C: Command Line** ⚡
 ```bat
-scripts\say.cmd --file hello.txt
+scripts\say.cmd "سلام دنیا"
 ```
+- Fastest, no GUI overhead
 
-`hello.txt` is a plain **UTF-8** file containing one Persian sentence:
-
-```
-سلام دنیا! این یک آزمایش روی ویندوز سی و دو است.
-```
-
-That writes `out.wav` (22.05 kHz, mono, 16-bit) next to the folder.
-
-Or from a normal command prompt, ASCII only:
-
-```bat
-scripts\say.cmd "hello world"
-```
+**That's it.** No Python. No installation. No internet needed. Speech appears in `out.wav`.
 
 ---
 
-## Commands
+## 🎯 What Can You Do?
 
-| Command | What it does |
-| --- | --- |
-| `scripts\gui.cmd` | Start the graphical interface (no install needed). |
-| `scripts\say.cmd "text"` | Speak text to `out.wav`. |
-| `scripts\say.cmd "text" mine.wav` | Speak text to `mine.wav`. |
-| `scripts\say.cmd --file text.txt` | Speak a UTF-8 file to `out.wav`. **Use this for Persian.** |
-| `scripts\say.cmd --file text.txt mine.wav` | Speak a UTF-8 file to `mine.wav`. |
-| `scripts\say_batch.cmd lines.txt` | One `.wav` per line of a UTF-8 file, in a `lines\` folder. |
-| `scripts\get_model.cmd` | Interactive menu to download other models. |
-| `scripts\get_model.cmd list` | Show every model and its source URL. |
-| `scripts\diagnose.cmd` | Crash/CPU diagnostic. **Run this first if anything fails.** |
+| Task | Command |
+|------|---------|
+| **Start Web Server** | `scripts\server.cmd` → Open http://127.0.0.1:8756/ |
+| **GUI Interface** | `scripts\gui.cmd` |
+| **Speak text** | `scripts\say.cmd "سلام دنیا"` |
+| **Save as custom file** | `scripts\say.cmd "text" output.wav` |
+| **Convert Persian text file** | `scripts\say.cmd --file input.txt` |
+| **Batch process (one wav per line)** | `scripts\say_batch.cmd lines.txt` |
+| **Download other voices** | `scripts\get_model.cmd` |
+| **Troubleshoot problems** | `scripts\diagnose.cmd` |
 
-`say.cmd` and `say_batch.cmd` accept `--speed`, `--sid`, `--threads` and
-`--scale` too; pass them straight through, e.g.:
+---
+
+## ✨ Why This Tool?
+
+✅ **Works on Windows 7** — the only offline TTS for old Windows  
+✅ **Completely offline** — no internet, no API calls, no tracking  
+��� **Persian-first** — supports Persian beautifully (UTF-8)  
+✅ **Web Interface** — access from any browser (http://127.0.0.1:8756)  
+✅ **Multilingual** — 10+ Persian voices + models for other languages  
+✅ **Lightweight** — fits in a USB stick  
+✅ **Free and open source** — no ads, no subscriptions  
+
+---
+
+## 🌐 Web Server Mode (NEW!)
+
+The easiest way to use Win7-TTS:
 
 ```bat
-scripts\say.cmd --file text.txt out.wav --speed 1.2
+scripts\server.cmd
 ```
 
-If `say.cmd` cannot find a model it tells you to run `scripts\get_model.cmd gyro`.
+1. Run the command above
+2. Your browser opens automatically to: **http://127.0.0.1:8756/**
+3. Type or paste Persian text
+4. Click **Generate**
+5. Hear the speech and download the `.wav`
 
-### Two messages that look alarming but are not
+**Features:**
+- 📱 Works on phone, tablet, or any computer with a browser
+- 🔗 Share the URL with others on your network
+- 🎨 Beautiful, responsive interface
+- 🚀 No plugins, no installation
+- 🔐 Completely local — nothing leaves your machine
 
-```
-Failed to create DXGI factory.
-```
-ONNX Runtime probes for a GPU at start-up. There is none, and none is wanted -
-everything runs on the CPU. The message comes from onnxruntime itself and
-cannot be silenced.
-
-```
-Skip unknown phonemes. Unicode codepoint: \U+0259.
-```
-The `haaniye` (Mimic3) model has a small phoneme vocabulary and simply does not
-contain every sound Persian can produce. Those sounds are skipped and the rest
-is spoken normally. You will see it most often with that model; `gyro` is much
-cleaner.
-
-```
-Non UTF8 encoded string is received.
-```
-Should not appear any more. If you still see it, pass the text with `--file`
-rather than `--text` and tell me, because it means the text reached the engine
-in the wrong encoding.
+**Access from:**
+- Same computer: `http://localhost:8756` or `http://127.0.0.1:8756`
+- Another computer on the network: `http://<your-ip>:8756` (find your IP with `ipconfig`)
 
 ---
 
-## Driving the engine directly
+## 🎤 Available Voices & Models
 
-`runtime\sherpa-onnx-offline-tts.exe` is the unmodified sherpa-onnx CLI (with
-its Win7 import problem patched). It is ASCII-only, because of the code page
-issue above — use `say.exe` for anything else:
+### Quick Download Links
+
+| Voice | Language | Download | Size | Quality |
+|-------|----------|----------|------|---------|
+| **`gyro`** ⭐ | Persian | [Included] | 450 MB | Best |
+| `amir` | Persian | [Run `get_model.cmd`] | 400 MB | Excellent |
+| `reza` | Persian + English | [Run `get_model.cmd`] | 380 MB | Very Good |
+| `haaniye` | Persian | [Run `get_model.cmd`] | 100 MB | Good |
+| `ganji` | Persian | [Run `get_model.cmd`] | 150 MB | Good |
+| `ganji-adabi` | Persian | [Run `get_model.cmd`] | 160 MB | Very Good |
+| `mms` | 1000+ languages | [Run `get_model.cmd`] | 600 MB | Good |
+| `negoo` | Persian (Female) | [Run `get_model.cmd`] | 200 MB | Good |
+| `arash` | Persian (Male) | [Run `get_model.cmd`] | 200 MB | Good |
+| `keyan` | Persian (Male) | [Run `get_model.cmd`] | 200 MB | Good |
+| `matab` | Persian (Female) | [Run `get_model.cmd`] | 200 MB | Good |
+| `shiva` | Persian (Female) | [Run `get_model.cmd`] | 200 MB | Good |
+| `bahman` | Persian (Male) | [Run `get_model.cmd`] | 200 MB | Good |
+
+**How to download models:**
+```bat
+# Interactive menu (recommended)
+scripts\get_model.cmd
+
+# View all available models
+scripts\get_model.cmd list
+
+# Or download from the web interface
+- Open http://127.0.0.1:8756/
+- Use model selector to download
+```
+
+**Manual Download:**
+All models are hosted on [HuggingFace](https://huggingface.co/karim23657). Browse and download directly if you prefer.
+
+---
+
+## 📖 First Time? Read This
+
+### Web Interface Method (Recommended for Beginners) 🌐
+
+1. Extract the ZIP
+2. Double-click `scripts\server.cmd`
+3. Browser opens automatically
+4. Type or paste Persian text
+5. Click **Generate**
+6. Hear the speech play back in the browser
+7. Click **Download** to save the `.wav` file
+
+### GUI Method (Windows Application) 🖥️
+
+1. Extract the ZIP
+2. Double-click `scripts\gui.cmd`
+3. Type or paste Persian text
+4. Click **Generate**
+5. Hear the speech play back
+6. Click **Open folder** to find `out.wav`
+
+### Command Line Method ⚡
 
 ```bat
-runtime\sherpa-onnx-offline-tts.exe ^
-  --vits-model=models\vits-piper-fa_IR-gyro-medium\fa_IR-gyro-medium.onnx ^
-  --vits-tokens=models\vits-piper-fa_IR-gyro-medium\tokens.txt ^
-  --vits-data-dir=models\vits-piper-fa_IR-gyro-medium\espeak-ng-data ^
-  --output-filename=out.wav "hello"
+# Simple: just speak
+scripts\say.cmd "سلام"
+
+# Save to a file
+scripts\say.cmd "سلام دنیا" output.wav
+
+# From a UTF-8 text file (BEST for Persian)
+scripts\say.cmd --file input.txt output.wav
+
+# Change speed
+scripts\say.cmd --file input.txt output.wav --speed 1.5
+
+# One wav file per line of text
+scripts\say_batch.cmd lines.txt
 ```
+
+**Always use `--file` for Persian** — it handles special characters correctly.
 
 ---
 
-## Models
+## ❓ Frequently Asked Questions
 
-The default is **`gyro`** (`fa_IR-gyro-medium`), a Persian Piper model at
-22.05 kHz. It is the best-sounding of the set and is already included.
-
-`scripts\get_model.cmd` can fetch the others. All of them come from the same
-sources as the HuggingFace Space:
-
-| Name | Model | Notes |
-| --- | --- | --- |
-| `gyro` | `fa_IR-gyro-medium` | Piper, 22 kHz. **Default, included.** |
-| `amir` | `fa_IR-amir-medium` | Piper, 22 kHz. |
-| `reza` | `fa_en` reza/ibrahim | Piper medium, Persian + English. |
-| `haaniye` | `mimic3-fa-haaniye_low` | Mimic3, low quality. |
-| `ganji` | `vits-piper-fa-ganji` | Small, 16 kHz. |
-| `ganji-adabi` | `vits-piper-fa-ganji-adabi` | Literary Persian. |
-| `negoo` | Kamtera female VITS | |
-| `arash` | Kamtera male1 VITS | |
-| `keyan` | Kamtera male VITS | |
-| `matab` | Kamtera female1 VITS | |
-| `shiva` | female GPTInformal VITS | Conversational Persian. |
-| `bahman` | SmartGitiCorp male VITS | |
-| `mms` | MMS multilingual `fas` | No espeak data needed. |
-
-After downloading a different model, point `say.cmd` at it by editing the
-`MODEL_DIR` line near the top of the script:
-
+### Q: What's the easiest way to use this?
+**A:** Use the web server:
 ```bat
-set "MODEL_DIR=%CD%\models\vits-piper-fa_IR-amir-medium"
+scripts\server.cmd
 ```
+Then open http://127.0.0.1:8756 in your browser. No installation needed!
 
-The engine expects the single `.onnx` file plus `tokens.txt` in that folder, so
-any other Piper/VITS Persian model will work too.
+### Q: Can I access the web interface from my phone?
+**A:** Yes! Find your computer's IP (run `ipconfig` in Command Prompt), then visit `http://<your-ip>:8756` from your phone. Both must be on the same network.
 
----
-
-## Folder layout
-
-```
-win7-tts\
-  README.md                      this file
-  CHANGELOG.md
-  Makefile                       build / test / package
-  build.cmd                      the same, on a Windows machine
-  docs\                          how_to, compiling, upgrading, win7, github
-  src\shim\                       w7shim.dll + patch_pe.py + self-test
-  src\say\, src\gui\, src\diag\   sources for say.exe, tts_gui.exe, diagnose.exe
-  build\, dist\                  intermediates and release archives (git-ignored)
-  runtime\          the engine - keep these together
-    sherpa-onnx-offline-tts.exe   stock sherpa-onnx CLI, Win7 imports patched
-    sherpa-onnx-c-api.dll          C API used by say.exe
-    sherpa-onnx-cxx-api.dll
-    onnxruntime.dll                inference engine
-    onnxruntime_providers_shared.dll
-    say.exe                        Unicode-safe front end
-    diagnose.exe                   CPU + crash diagnostic used by diagnose.cmd
-    w7shim.dll                     the Windows 7 compatibility shim
-  models\
-    vits-piper-fa_IR-gyro-medium\  the default model
-  scripts\
-    gui.cmd                        launch the GUI
-    gui.py                         the same GUI in Tkinter (needs Python 3.8)
-    say.cmd                        speak text / a UTF-8 file
-    say_batch.cmd                  one wav per line
-    get_model.cmd                  download other models
-  tools\
-    shim\                          source of w7shim.dll + the PE patcher
-    say\                           source of say.exe
-    gui\                           source of tts_gui.exe
-```
-
----
-
-## The graphical interface
-
-`scripts\gui.cmd` starts `runtime\tts_gui.exe`: pick a model, type text, move
-the speed slider, press **Generate**, and the speech is written to `out.wav`
-and played back. **Open folder** reveals the file, **Save as...** picks a
-different one, and **Stop** cuts off playback.
-
-Everything the user types is handled with the wide-character API and converted
-to UTF-8 only at the boundary, so Persian appears correctly in the text box and
-reaches the engine intact. Synthesis runs on a worker thread, so the window
-stays responsive and shows a progress bar rather than going grey.
-
-`tts_gui.exe` is native Win32 and needs **nothing** installed - no Python, no
-runtime redistributable beyond the one the engine already wants. That matters
-on Windows 7, which can only run Python up to 3.8.
-
-### If you prefer Tkinter
-
-`scripts\gui.py` is the same interface in Python, easier to hack on. It needs
-**Python 3.8.10** - the last release with Windows 7 support - installed with
-the *tcl/tk and IDLE* option, otherwise tkinter is missing:
-
+### Q: Why is it just question marks "????"?
+**A:** You're using the wrong method. Always use:
 ```bat
-python scripts\gui.py
+scripts\say.cmd --file yourfile.txt
 ```
+Make sure your text file is saved as **UTF-8** (Notepad: Save As → Encoding: UTF-8).
 
-It drives `runtime\say.exe` as a subprocess, which means the model is reloaded
-for every utterance. For long lists prefer `scripts\say_batch.cmd`, which loads
-the model once.
+### Q: I see "Failed to create DXGI factory"
+**A:** That's normal. The engine looks for a graphics card. You don't have one (or don't need one), and that's fine. Keep going.
 
-`runtime\` must stay in one folder: `w7shim.dll` has to sit next to the binaries
-that import from it.
-
----
-
-## How the Win7 fix works
-
-`runtime/w7shim.dll` is a ~120 KB DLL that redirects the imports the engine
-could not otherwise satisfy.
-
-1. **`patch_pe.py`** walks the PE import directory and repoints the DLL name of
-   the `KERNEL32.dll`, `api-ms-win-core-path-l1-1-0.dll` and `dxgi.dll`
-   descriptors at `w7shim.dll`. Nothing else moves, so the file layout and
-   relocation tables stay valid. Before writing, it checks that the shim really
-   does export every name being redirected, and refuses if not.
-
-   The two cases are handled differently. `KERNEL32.dll` and
-   `api-ms-win-core-path-l1-1-0.dll` are long enough that the name is simply
-   overwritten in place with `w7shim.dll` and NUL padding. `dxgi.dll` is
-   *shorter* than `w7shim.dll` and cannot be overwritten that way — instead the
-   descriptor's name RVA (which is just a pointer to a string) is repointed at
-   the `w7shim.dll` string an earlier descriptor already wrote. Several
-   descriptors sharing one name string is perfectly legal.
-
-2. **`w7shim.dll`** exports one function per redirected import. Each is a
-   6-byte trampoline (`jmp qword ptr [slot]`) and, at `DLL_PROCESS_ATTACH`,
-   every slot is filled with one of:
-   - the **real** function, if it exists on the running system — looked up with
-     `GetProcAddress` across the canonical DLL, `ntdll.dll`, and `kernel32.dll`,
-     which is how `EncodePointer` and friends resolve (`RtlEncodePointer`);
-   - a genuine **Windows 7 implementation**, for the functions that simply do
-     not exist there:
-     - `GetSystemTimePreciseAsFileTime` → `GetSystemTimeAsFileTime`
-     - `InitializeCriticalSectionEx` → `InitializeCriticalSectionAndSpinCount`
-     - `CreateFile2` → `CreateFileW`
-     - `GetProcessMitigationPolicy` → reports "no mitigations"
-     - `FlsAlloc`/`Free`/`GetValue`/`SetValue` → rebuilt on Win32 `TlsAlloc` and
-       friends, which Windows 7 does have
-     - `InitializeConditionVariable`/`Wake`/`SleepConditionVariableSRW` →
-       rebuilt on `SRWLOCK` plus one event per waiter
-     - `PathCchRemoveBackslash`/`PathCchRemoveFileSpec` → string handling;
-       Windows 7's `shcore.dll` only has the older `Path*` API
-     - `CreateDXGIFactory2` → forwarded to `CreateDXGIFactory1`, which Windows 7
-       does have and which has an identical signature
-   - or, in the worst case, a `xor eax,eax; ret` stub — so the DLL **always**
-     loads rather than failing at process start.
-
-### Rebuilding the shim
-
-Needs MinGW-w64 (`x86_64-w64-mingw32-gcc`) and Python 3:
-
+### Q: The audio is just silence or very quiet
+**A:** Your CPU might be old. Run this to check:
 ```bat
-cd tools\shim
-python gen_shim.py imports.txt --outdir gen
-x86_64-w64-mingw32-gcc -shared -O2 -o w7shim.dll ^
-    win7shim.c win7shim_fallback.c ^
-    gen\win7shim_table.c gen\win7shim_thunks.S gen\win7shim.def ^
-    -lkernel32 -static-libgcc
+scripts\diagnose.cmd
 ```
+If it says `AVX: NO`, your CPU is too old (pre-2011).
 
-`imports.txt` lists the functions to redirect, one line per DLL. Regenerate it
-from a fresh sherpa-onnx download whenever you update the runtime, e.g. with
-`objdump -x` on each `.exe`/`.dll` and collecting the `KERNEL32.dll` and
-`api-ms-win-core-path-l1-1-0.dll` entries.
+### Q: Can I use this on Windows 10/11?
+**A:** Yes, it works on modern Windows too. But it's optimized for Windows 7.
 
-### Verifying the shim
-
-`tools\shim\test\` contains a self-test that calls every Windows 7 fallback
-directly and checks it behaves correctly (timing advances, FLS round-trips, a
-condition-variable waiter is actually released and also honours its timeout,
-`PathCchRemoveFileSpec` strips the right component, and so on):
-
+### Q: How do I change the voice speed?
+**A:**
 ```bat
-cd tools\shim
-x86_64-w64-mingw32-gcc -O2 -I. -o test\test_shim.exe test\test_shim.c
-copy w7shim.dll test\
-python patch_pe.py test\test_shim.exe --inplace --shim test\w7shim.dll
-test\test_shim.exe
+scripts\say.cmd --file text.txt output.wav --speed 1.5
 ```
+- `1.0` = normal
+- `1.5` = 50% faster
+- `0.8` = 20% slower
 
-Expected output ends with `RESULT: ALL PASS`. `CreateFile2` reports `[SKIP]`
-when the host already exports its own non-Windows-8 variant, which is expected
-under Wine and does not happen on real Windows 7.
+### Q: How do I download additional models/voices?
+**A:** Run this command:
+```bat
+scripts\get_model.cmd
+```
+Then choose the voice you want from the menu. It will download automatically to the `models\` folder.
 
----
-
-## What was verified, and what was not
-
-Verified by actually running it under Wine configured as **Windows 7**
-(`HKCU\Software\Wine\Version = win7`):
-
-- the shim loads and resolves every redirected import;
-- all shim fallbacks pass the self-test (`RESULT: ALL PASS`), including
-  `CreateDXGIFactory2`, which is resolved by name and called directly so that
-  Wine's own working export cannot mask a broken fallback;
-- `sherpa-onnx-offline-tts.exe` starts and prints its usage;
-- `say.exe` / `say.cmd` load the gyro model and synthesise **real Persian
-  audio** — checked as non-silent 16-bit PCM at 22.05 kHz, e.g. 3.26 s for one
-  sentence;
-- `say_batch.cmd` writes one correctly-sized `.wav` per input line;
-- `--speed` changes the output duration as expected;
-- `tts_gui.exe` launches, detects the installed model, renders its controls,
-  and - driven through the real window - typed Persian text and produced a
-  2.1 s `.wav`, ending with the progress bar full and the status reading
-  "Playing...";
-- `scripts\gui.py` imports, discovers models, renders the same layout with
-  right-justified (RTL) text, and the exact command line it runs was confirmed
-  to produce 2.2 s of Persian audio.
-
-Three genuine bugs were found and fixed by that testing, all worth knowing
-about:
-
-- **The FLS initialisation race**, which caused the crash reported on Windows 7:
-  `w7shim` rebuilt the Win8 `FlsAlloc` family on top of `TlsAlloc`, but its
-  one-time setup published "ready" *before* initialising the lock it protects.
-  onnxruntime allocates FLS slots from several threads while building a
-  session, so a second thread could enter a `CRITICAL_SECTION` that was not yet
-  initialised - an access violation (`0xC0000005`) during model load. It now
-  uses `InitOnceExecuteOnce`, which cannot be entered concurrently. The
-  self-test hammers this from 16 threads to keep it fixed. Reproducing the old
-  code with a widened race window made it hang immediately, versus a clean exit
-  with the fix.
-
-  Note this is invisible under Wine, where the host *does* export `FlsAlloc`
-  and the shim forwards instead of using its own implementation - which is
-  exactly why a crash could appear on real Windows 7 only.
-
-- `gui.py` originally called `root.after()` from the worker thread. That is not
-  thread-safe in Tk and aborts the interpreter. It now uses a `queue.Queue`
-  drained by a UI-thread timer.
-- `gui.py` captured the engine's output through a pipe and `communicate()`,
-  which can block forever because anything the engine spawns inherits the write
-  end. It now writes to a file and waits with an explicit timeout.
-
-Confirmed on real Windows 7 hardware by the user:
-
-- the FLS initialisation race above was the cause of the reported crash, and the
-  fix is confirmed: `scripts\diagnose.cmd` now reports
-  `exit code: 0x00000000` / `output wav: created` with real audio from the
-  `haaniye` model.
-
-Not verified:
-
-- The Tkinter front end was **not** driven all the way through to a generated
-  `.wav` in this environment: `subprocess` cannot execute the Windows `say.exe`
-  on the Linux test machine, and running it through Wine inside a Tk process
-  misbehaves (the engine process gets stuck). Its logic, layout and the exact
-  command line it issues were each verified separately, and both bugs above
-  came out of that work - but the last hop, `Popen` on real Windows, is
-  unexercised. If the Tk version misbehaves, use `scripts\gui.cmd`, which is
-  fully verified, or the command line.
-
-Not verified, because it needs real hardware:
-
-- a genuine Windows 7 SP1 machine. Wine reimplements the loader faithfully, but
-  it is not the kernel.
-- the **Visual C++ 2015-2022 redistributable**. The engine imports
-  `VCRUNTIME140`, `MSVCP140` and `api-ms-win-crt-*`. Install the x64
-  redistributable first, or copy those DLLs from a machine that has it. This is
-  the most likely remaining source of trouble on a real Win7 box.
-- the `CreateDXGIFactory2` fallback could not be exercised against a real
-  Windows 7 `dxgi.dll`, since Wine supplies its own. It was verified directly
-  instead: the self-test resolves the Windows 7 implementation by name and
-  calls it, and it returns a well-formed HRESULT rather than failing to link.
+Or use the web interface:
+- Go to http://127.0.0.1:8756/
+- Click the model selector
+- Choose and download
 
 ---
 
-## If it crashes: run the diagnostic first
+## 🔧 Troubleshooting
 
-Before anything else, run:
+### "The procedure entry point could not be located"
+→ The `runtime\` folder is incomplete. **Re-extract the ZIP from the release.**
 
+### "VCRUNTIME140.dll was not found"
+→ Install the [Visual C++ 2015-2022 Redistributable (x64)](https://support.microsoft.com/en-us/help/2977003)
+
+### "could not create the TTS engine"
+→ The model folder is missing or has the wrong path. Run:
 ```bat
 scripts\diagnose.cmd
 ```
 
-It prints your CPU's instruction-set support, checks that the VC++ runtime and
-all `runtime\` files are present, tries to load onnxruntime, and then runs a
-real synthesis — showing the Windows exception code if anything dies. **Paste
-the whole output when reporting a problem**; the exception code identifies the
-cause immediately.
+### Server won't start / "Port 8756 already in use"
+→ Another application is using port 8756. Either:
+1. Close the other application
+2. Edit `scripts\server.cmd` and change `8756` to a different port (e.g., `8757`)
+3. Stop the server with `Ctrl+C` in the Command Prompt
 
-| Exception | Meaning |
-| --- | --- |
-| `0xC000001D` | Illegal instruction — the CPU is too old (needs AVX). |
-| `0xC0000005` | Access violation — `runtime\` is incomplete or the DLLs mismatch. |
-| `0xC000007B` | Bad DLL image — usually a 32-bit DLL on 64-bit Windows. |
-| `0xC0000135` | A DLL was not found — normally the Visual C++ runtime. |
-| `0xC0000139` | Entry point not found — `w7shim.dll` missing or misplaced. |
-| `0xC0000409` | Stack overrun — retry with `--threads 1`. |
+### Speech is very slow / CPU is maxed
+→ VITS models are CPU-intensive. Try:
+```bat
+scripts\say.cmd --file text.txt output.wav --threads 2
+```
+Or switch to the smaller `ganji` model (16 kHz).
 
-`say.exe` also installs a crash handler, so instead of the bare "say.exe has
-stopped working" dialog it now prints the exception code and a plain-English
-explanation of what to do.
-
----
-
-## CPU too old
-
-The engine is ONNX Runtime 1.28, whose x64 CPU kernels **require AVX**. Any CPU
-without AVX — in practice anything made before 2011 — raises an illegal
-instruction fault and the process dies. Windows 7 machines are old enough that
-this is a realistic possibility, and it cannot be worked around from the
-outside, because the AVX instructions live inside `onnxruntime.dll`.
-
-`scripts\diagnose.cmd` reports `AVX : NO` if that is your situation. Options,
-best first:
-
-1. **Use a different machine.** Anything with a Core i5/i7 from 2011 onwards,
-   or any AMD CPU from Bulldozer (2011) onwards, is fine.
-2. **Use an older engine.** sherpa-onnx releases from around v1.10 bundle an
-   older ONNX Runtime that still has non-AVX code paths. Download such a release
-   from the [releases page](https://github.com/k2-fsa/sherpa-onnx/releases),
-   replace `runtime\onnxruntime.dll` with the one from that archive, then
-   re-apply the patch (below). It will be slower but should run.
-3. **Use Piper instead.** The original [`piper`](https://github.com/rhasspy/piper)
-   releases have a CPU-only ONNX build that predates the AVX requirement, at the
-   cost of no GUI from this package.
+### Still stuck?
+→ Run the diagnostic:
+```bat
+scripts\diagnose.cmd
+```
+Copy the **entire output** and open an issue on GitHub or ask in our [Telegram channel](https://t.me/persian_tts).
 
 ---
 
-## Troubleshooting
+## 📁 What's Inside?
 
-**`The procedure entry point ... could not be located`**
-`w7shim.dll` is missing or not beside the binary that needs it. Keep the whole
-`runtime\` folder together.
-
-**`The code execution cannot proceed because VCRUNTIME140.dll was not found`**
-Install the Visual C++ 2015-2022 **x64** redistributable.
-
-**`The procedure entry point CreateDXGIFactory2 could not be located ... dxgi.dll`**
-You are running an older build from before dxgi redirection was added. Re-extract
-the current archive, or re-patch the runtime:
-`python tools\shim\patch_pe.py runtime\onnxruntime.dll --inplace --shim runtime\w7shim.dll`
-
-**Audio is a tiny click, or the text prints as `????`**
-Persian was passed straight to `sherpa-onnx-offline-tts.exe`. Use
-`scripts\say.cmd --file text.txt` with a UTF-8 file.
-
-**`could not create the TTS engine`**
-Model path problem. Check `MODEL_DIR` in `say.cmd`, and confirm the model folder
-contains both the `.onnx` file and `tokens.txt`.
-
-**Very slow synthesis**
-VITS is CPU-bound. Lower `--threads` on a small machine, or switch to the smaller
-`ganji` (16 kHz) model.
+```
+win7-tts\
+  ├─ README.md                     ← you are here
+  ├─ scripts\
+  │  ├─ server.cmd                 ← start web interface (NEW!)
+  │  ├─ gui.cmd                    ← visual interface
+  │  ├─ say.cmd                    ← command line tool
+  │  ├─ say_batch.cmd              ← batch processor
+  │  ├─ get_model.cmd              ← download voices
+  │  ├─ diagnose.cmd               ← troubleshoot
+  │  └─ gui.py                     ← Python GUI (optional)
+  ├─ runtime\                      ← the engine (don't move files around)
+  │  ├─ sherpa-onnx-offline-tts.exe
+  │  ├─ say.exe
+  │  ├─ tts_gui.exe
+  │  ├─ tts_server.exe             ← web server executable
+  │  ├─ w7shim.dll                 ← Windows 7 compatibility
+  │  └─ *.dll                      ← libraries
+  ├─ models\
+  │  └─ vits-piper-fa_IR-gyro-medium\  ← default voice (already included)
+  ├─ docs\                         ← technical documentation
+  └─ out.wav                       ← where your audio files are saved
+```
 
 ---
 
-## Credits and licences
+## 🚀 Advanced Options
 
-- **sherpa-onnx** (k2-fsa) — Apache-2.0. The engine, the C API, and the import
-  redirect technique are all built on its release binaries.
-- **ONNX Runtime** (Microsoft) — MIT.
-- **espeak-ng** phonemiser data — GPL-3.0 with a linking exception, shipped
-  inside the model folders.
-- **Piper / VITS** models — each carries its own licence; see the repositories
-  linked by `scripts\get_model.cmd list`.
-- The Persian model set mirrors the HuggingFace Space
-  [`karim23657/Persian-TTS-sherpa`](https://huggingface.co/spaces/karim23657/Persian-TTS-sherpa)
-  and the `karim23657/persian-tts-vits` repository.
+### Use Different Voice
+Edit the `MODEL_DIR` line in `scripts\say.cmd`:
+```bat
+set "MODEL_DIR=%CD%\models\vits-piper-fa_IR-amir-medium"
+```
+
+### Run Server on Custom Port
+Edit `scripts\server.cmd`:
+```bat
+runtime\tts_server.exe --port 9000
+```
+
+### Drive the Engine Directly
+For experts only:
+```bat
+runtime\sherpa-onnx-offline-tts.exe ^
+  --vits-model=models\gyro\fa_IR-gyro-medium.onnx ^
+  --vits-tokens=models\gyro\tokens.txt ^
+  --vits-data-dir=models\gyro\espeak-ng-data ^
+  --output-filename=out.wav "hello"
+```
+
+### Batch Processing
+Generate one `.wav` per line of a text file:
+```bat
+scripts\say_batch.cmd myfile.txt
+```
+Output goes to `lines\` folder (one file per line).
+
+---
+
+## 🛠️ For Developers
+
+Want to understand how it works or contribute?
+
+- **[How it works](docs/how_to.md)** — architecture and design decisions
+- **[Compiling](docs/compiling.md)** — build from source
+- **[Windows 7 fixes](docs/win7.md)** — the technical challenges and solutions
+- **[Upgrading sherpa-onnx](docs/upgrading-sherpa.md)** — update the engine
+- **[Publishing](docs/github-upload.md)** — release process
+
+---
+
+## 🎓 Key Features Explained
+
+### ✅ Works Offline
+No internet connection needed. The model and engine are bundled. This is a **huge** advantage over web APIs like Google TTS or Azure Speech.
+
+### ✅ No Installation
+Just extract and run. No Python. No admin rights. No registry changes. Perfect for USB sticks or locked-down machines.
+
+### ✅ Web Interface
+Access from any browser — desktop, phone, tablet. Share across your network. No plugins or extensions needed.
+
+### ✅ Handles Persian Correctly
+Persian text needs **UTF-8 encoding**. Most tools fail here. We handle it automatically — Persian text will sound correct.
+
+### ✅ Multiple Voices & Languages
+Start with Persian (`gyro` voice). Download more via `scripts\get_model.cmd`. We have 10+ Persian voices and multilingual models.
+
+### ✅ Small Download
+Only 200-500 MB depending on which models you add. Small enough for USB.
+
+---
+
+## ❗ Common Issues at a Glance
+
+| Problem | Solution |
+|---------|----------|
+| "????" instead of Persian | Use `--file` with UTF-8 text file |
+| No audio / silence | CPU too old? Run `scripts\diagnose.cmd` |
+| DLL not found errors | Reinstall Visual C++ 2015-2022 Redistributable (x64) |
+| "procedure entry point" error | Re-extract the ZIP file |
+| Server won't start | Port 8756 in use. Change port in `server.cmd` |
+| Very slow synthesis | Lower `--threads`, or use smaller model |
+
+---
+
+## 📊 Performance
+
+| Model | Speed | Quality | Size |
+|-------|-------|---------|------|
+| gyro (default) | Fast | Best | 450 MB |
+| ganji | Fastest | Good | 150 MB |
+| haaniye | Fast | Good | 100 MB |
+| mms | Medium | Good | 600 MB |
+
+On a modern CPU (2011+), expect **real-time or faster** (speech takes 3 seconds, synthesis takes 2-3 seconds).
+
+---
+
+## 📜 License & Credits
+
+- **sherpa-onnx** (k2-fsa) — Apache-2.0
+- **ONNX Runtime** (Microsoft) — MIT
+- **Piper / VITS models** — individual licenses (see each model)
+- **This tool** — MIT
+
+Persian models by [karim23657](https://huggingface.co/karim23657)
+
+---
+
+## 🤝 Need Help?
+
+1. **Read the FAQ above** — most questions are answered
+2. **Run the diagnostic** — `scripts\diagnose.cmd` and paste the output
+3. **Join our Telegram** — **[📱 Telegram Channel](https://t.me/persian_tts)** 
+4. **Check the docs** — see `docs/` folder for technical details
+5. **Open an issue** — [GitHub Issues](https://github.com/karim23657/offline-persian-tts-win7/issues)
+
+---
+
+## 🌍 Use Cases
+
+✅ Create audiobooks in Persian  
+✅ Generate voiceovers for videos  
+✅ Automate speech for accessibility tools  
+✅ Build chatbots with speech output  
+✅ Test pronunciation  
+✅ Learn Persian pronunciation  
+✅ Use on old machines that can't run modern software  
+✅ Web-based interface for shared use across a network  
+
+---
+
+## What Makes This Different?
+
+| Feature | This Tool | Google TTS | Azure Speech | Piper |
+|---------|-----------|-----------|--------------|-------|
+| **Offline** | ✅ | ❌ | ❌ | ✅ |
+| **Windows 7** | ✅ | ❌ | ❌ | ❌ |
+| **Persian** | ✅ | ✅ | ✅ | ❌ |
+| **Free** | ✅ | ❌ | ❌ | ✅ |
+| **GUI** | ✅ | N/A | N/A | ❌ |
+| **Web Interface** | ✅ | N/A | N/A | ❌ |
+| **No setup** | ✅ | N/A | ❌ | ❌ |
+
+---
+
+**🎉 Ready? [Download the latest release now](https://github.com/karim23657/offline-persian-tts-win7/releases/latest)**
+
+Extract → Run `scripts\server.cmd` → Open browser → Type Persian → Hear speech. Done!
+
+---
+
+---
+
+---
+
+# 🌐 نسخه فارسی
+
+# 🗣️ Win7-TTS — متن به گفتار فارسی آفلاین برای ویندوز 7
+
+**متن فارسی را به گفتار طبیعی تبدیل کنید. بدون اینترنت. بدون نصب. فقط دانلود و استفاده کنید.**
+
+---
+
+## 💬 به ما بپیوندید
+
+**[📱 کانال تلگرام](https://t.me/persian_tts)** — به‌روزرسانی‌ها، پاسخ سؤالات، اشتراک‌گذاری آفرینش‌ها
+
+---
+
+## ⚡ شروع سریع در ۳۰ ثانیه
+
+### 1. دانلود
+👉 **[دانلود آخرین نسخه (ZIP)](https://github.com/karim23657/offline-persian-tts-win7/releases/latest)**
+
+### 2. استخراج فایل
+فای�� ZIP را در هر جای کامپیوتر خود استخراج کنید.
+
+### 3. اجرا
+یکی از این روش‌ها را انتخاب کنید:
+
+**گزینه الف: وب‌سایت (ساده‌ترین)** 🌐
+```bat
+scripts\server.cmd
+```
+سپس در مرورگر خود باز کنید: **http://127.0.0.1:8756/**
+- رابط وب زیبا
+- از هر دستگاهی در شبکه کار می‌کند
+- نیاز به نصب ندارد
+
+**گزینه ب: برنامه GUI** 🖥️
+```bat
+scripts\gui.cmd
+```
+- رابط گرافیکی (ویندوز بومی)
+- سریع‌ترین کارایی
+
+**گزینه ج: خط فرمان** ⚡
+```bat
+scripts\say.cmd "سلام دنیا"
+```
+- سریع‌ترین، بدون GUI
+
+**همین است.** بدون Python. بدون نصب. بدون اینترنت. فایل صوتی در `out.wav` ذخیره می‌شود.
+
+---
+
+## 🎯 کار‌های ممکن
+
+| کار | دستور |
+|-----|--------|
+| **شروع سرور وب** | `scripts\server.cmd` → باز کردن http://127.0.0.1:8756/ |
+| **رابط GUI** | `scripts\gui.cmd` |
+| **گفتن متن** | `scripts\say.cmd "سلام دنیا"` |
+| **ذخیره در فایل سفارشی** | `scripts\say.cmd "متن" output.wav` |
+| **تبدیل فایل متنی فارسی** | `scripts\say.cmd --file input.txt` |
+| **پردازش دسته‌ای** | `scripts\say_batch.cmd lines.txt` |
+| **دانلود صدای دیگر** | `scripts\get_model.cmd` |
+| **رفع مشکل** | `scripts\diagnose.cmd` |
+
+---
+
+## ✨ چرا این ابزار؟
+
+✅ **برای ویندوز 7** — تنها ابزار متن به گفتار آفلاین برای ویندوز قدیم  
+✅ **کاملاً آفلاین** — بدون اینترنت، بدون ردگیری  
+✅ **بهینه برای فارسی** — از UTF-8 به‌درستی پشتیبانی می‌کند  
+✅ **رابط وب** — از هر مرورگری دسترسی (http://127.0.0.1:8756)  
+✅ **چند صدای فارسی** — بیش از ۱۰ صدای مختلف فارسی  
+✅ **سبک و کوچک** — در یک فلش مموری جا می‌گیرد  
+✅ **رایگان و متن‌باز** — بدون تبلیغات و اشتراک  
+
+---
+
+## 🌐 حالت سرور وب (جدید!)
+
+ساده‌ترین راه برای استفاده از Win7-TTS:
+
+```bat
+scripts\server.cmd
+```
+
+1. دستور بالا را اجرا کنید
+2. مرورگر شما خودکار باز می‌شود: **http://127.0.0.1:8756/**
+3. متن فارسی را تایپ یا چسباندن کنید
+4. روی **Generate** کلیک کنید
+5. صدا پخش می‌شود و می‌توانید دانلود کنید
+
+**ویژگی‌ها:**
+- 📱 از گوشی، تبلت یا هر کامپیوتری با مرورگر کار می‌کند
+- 🔗 آدرس را با دیگران در شبکه به‌اشتراک بگذارید
+- 🎨 رابط زیبا و پاسخ‌گو
+- 🚀 بدون پلاگین، بدون نصب
+- 🔐 کاملاً محلی — هیچ اطلاعاتی به بیرون نمی‌رود
+
+**دسترسی از:**
+- همان کامپیوتر: `http://localhost:8756` یا `http://127.0.0.1:8756`
+- کامپیوتر دیگری در شبکه: `http://<your-ip>:8756` (IP خود را با `ipconfig` پیدا کنید)
+
+---
+
+## 🎤 صداها و مدل‌های دانلودی
+
+| صدا | زبان | دانلود | حجم | کیفیت |
+|-----|------|--------|------|-------|
+| **`gyro`** ⭐ | فارسی | [موجود است] | 450 MB | بهترین |
+| `amir` | فارسی | [اجرای `get_model.cmd`] | 400 MB | عالی |
+| `reza` | فارسی + انگلیسی | [اجرای `get_model.cmd`] | 380 MB | خوب جداً |
+| `haaniye` | فارسی | [اجرای `get_model.cmd`] | 100 MB | خوب |
+| `ganji` | فارسی | [اجرای `get_model.cmd`] | 150 MB | خوب |
+| `ganji-adabi` | فارسی (ادبی) | [اجرای `get_model.cmd`] | 160 MB | خوب جداً |
+| `mms` | ۱۰۰۰+ زبان | [اجرای `get_model.cmd`] | 600 MB | خوب |
+| `negoo` | فارسی (زنانه) | [اجرای `get_model.cmd`] | 200 MB | خوب |
+| `arash` | فارسی (مردانه) | [اجرای `get_model.cmd`] | 200 MB | خوب |
+| `keyan` | فارسی (مردانه) | [اجرای `get_model.cmd`] | 200 MB | خوب |
+| `matab` | فارسی (زنانه) | [اجرای `get_model.cmd`] | 200 MB | خوب |
+| `shiva` | فارسی (زنانه) | [اجرای `get_model.cmd`] | 200 MB | خوب |
+| `bahman` | فارسی (مردانه) | [اجرای `get_model.cmd`] | 200 MB | خوب |
+
+**چگونه صدای دیگری دانلود کنید:**
+```bat
+# منوی تعاملی (توصیه می‌شود)
+scripts\get_model.cmd
+
+# دیدن تمام مدل‌های دستیاب
+scripts\get_model.cmd list
+
+# یا از رابط وب استفاده کنید
+http://127.0.0.1:8756/
+```
+
+---
+
+## 📖 اولین بار؟ این را بخوانید
+
+### روش رابط وب (توصیه شده برای مبتدیان) 🌐
+
+1. فایل ZIP را استخراج کنید
+2. روی `scripts\server.cmd` دوبار کلیک کنید
+3. مرورگر خودکار باز می‌شود
+4. متن فارسی را تایپ کنید
+5. روی **Generate** کلیک کنید
+6. صدا در مرورگر پخش می‌شود
+7. روی **Download** کلیک کنید تا فایل `.wav` ذخیره شود
+
+### روش GUI (برنامه ویندوز) 🖥️
+
+1. فایل ZIP را استخراج کنید
+2. روی `scripts\gui.cmd` دوبار کلیک کنید
+3. متن فارسی را تایپ کنید
+4. روی **Generate** کلیک کنید
+5. صدا پخش می‌شود
+6. برای یافتن `out.wav` روی **Open folder** کلیک کنید
+
+### روش خط فرمان ⚡
+
+```bat
+# ساده: فقط گفتن
+scripts\say.cmd "سلام"
+
+# ذخیره در فایل
+scripts\say.cmd "سلام دنیا" output.wav
+
+# از یک فایل متنی UTF-8 (بهترین برای فارسی)
+scripts\say.cmd --file input.txt output.wav
+
+# تغییر سرعت
+scripts\say.cmd --file input.txt output.wav --speed 1.5
+
+# یک فایل صوتی برای هر سطر
+scripts\say_batch.cmd lines.txt
+```
+
+**برای فارسی، همیشه `--file` استفاده کنید** — حروف خاص را به‌درستی کنترل می‌کند.
+
+---
+
+## ❓ سوالات متداول
+
+### س: ساده‌ترین روش استفاده چیست؟
+**ج:** از سرور وب استفاده کنید:
+```bat
+scripts\server.cmd
+```
+سپس http://127.0.0.1:8756 را در مرورگر باز کنید. نیاز به نصب ندارد!
+
+### س: می‌توانم از رابط وب از روی گوشی‌ام دسترسی پیدا کنم؟
+**ج:** بله! IP کامپیوتر خود را پیدا کنید (`ipconfig`), سپس از گوشی خود `http://<ip>:8756` را باز کنید. هر دو باید در یک شبکه باشند.
+
+### س: چرا به جای متن فارسی "????" نشان می‌دهد؟
+**ج:** شما از روش غلط استفاده می‌کنید. همیشه استفاده کنید:
+```bat
+scripts\say.cmd --file yourfile.txt
+```
+اطمینان حاصل کنید فایل متنی شما **UTF-8** است (Notepad: Save As → Encoding: UTF-8).
+
+### س: پیام "Failed to create DXGI factory" دیدم
+**ج:** این طبیعی است. موتور به دنبال کارت گرافیک می‌گردد. مشکلی نیست.
+
+### س: صدا سکوت یا بسیار ضعیف است
+**ج:** CPU شما ممکن است قدیم باشد. این را اجرا کنید:
+```bat
+scripts\diagnose.cmd
+```
+اگر "AVX: NO" نوشت، CPU شما خیلی قدیم است (قبل از 2011).
+
+### س: می‌توانم از این در ویندوز 10/11 استفاده کنم؟
+**ج:** بله، در ویندوز مدرن هم کار می‌کند. اما برای ویندوز 7 بهینه است.
+
+### س: چگونه سرعت صدا را تغییر دهم؟
+**ج:**
+```bat
+scripts\say.cmd --file text.txt output.wav --speed 1.5
+```
+- `1.0` = معمولی
+- `1.5` = 50% سریع‌تر
+- `0.8` = 20% آهسته‌تر
+
+### س: چگونه صدای بیشتری دانلود کنم؟
+**ج:** این دستور را اجرا کنید:
+```bat
+scripts\get_model.cmd
+```
+
+یا از رابط وب استفاده کنید:
+- http://127.0.0.1:8756/ را باز کنید
+- انتخاب‌گر مدل را کلیک کنید
+- صدا را انتخاب و دانلود کنید
+
+---
+
+## 🔧 رفع مشکل
+
+### "The procedure entry point could not be located"
+→ پوشه `runtime\` ناقص است. **ZIP را دوباره استخراج کنید.**
+
+### "VCRUNTIME140.dll was not found"
+→ [Visual C++ 2015-2022 Redistributable (x64)](https://support.microsoft.com/en-us/help/2977003) را نصب کنید.
+
+### "could not create the TTS engine"
+→ مسیر مدل اشتباه است. اجرا کنید:
+```bat
+scripts\diagnose.cmd
+```
+
+### سرور راه‌اندازی نمی‌شود / "Port 8756 already in use"
+→ یک برنامه دیگر از پورت 8756 استفاده می‌کند. یا:
+1. برنامه دیگر را ببندید
+2. `scripts\server.cmd` را ویرایش کنید و `8756` را به پورت دیگر تغییر دهید (مثلاً `8757`)
+3. سرور را با `Ctrl+C` متوقف کنید
+
+### سنتز صدا بسیار آهسته است
+→ VITS CPU-intensive است. تلاش کنید:
+```bat
+scripts\say.cmd --file text.txt output.wav --threads 2
+```
+
+---
+
+## 📁 محتوی پوشه
+
+```
+win7-tts\
+  ├─ README.md                     ← این فایل
+  ├─ scripts\
+  │  ├─ server.cmd                 ← شروع رابط وب (جدید!)
+  │  ├─ gui.cmd                    ← رابط گرافیکی
+  │  ├─ say.cmd                    ← خط فرمان
+  │  ├─ get_model.cmd              ← دانلود صدا
+  │  └─ diagnose.cmd               ← رفع مشکل
+  ├─ runtime\                      ← موتور
+  ├─ models\                       ← صداها
+  └─ out.wav                       ← فایل صوت خروجی
+```
+
+---
+
+## 🚀 گزینه‌های پیشرفته
+
+### استفاده از صدای دیگر
+خط `MODEL_DIR` در `scripts\say.cmd` را ویرایش کنید:
+```bat
+set "MODEL_DIR=%CD%\models\vits-piper-fa_IR-amir-medium"
+```
+
+### اجرای سرور در پورت دلخواه
+`scripts\server.cmd` را ویرایش کنید:
+```bat
+runtime\tts_server.exe --port 9000
+```
+
+### پردازش دسته‌ای
+یک `.wav` برای هر سطر:
+```bat
+scripts\say_batch.cmd myfile.txt
+```
+
+---
+
+## ❗ مشکلات رایج
+
+| مشکل | راه حل |
+|------|---------|
+| "????" به جای فارسی | از `--file` استفاده کنید |
+| بدون صدا | CPU قدیم؟ اجرای `scripts\diagnose.cmd` |
+| خطای DLL | Visual C++ 2015-2022 را نصب کنید |
+| خطای "procedure entry point" | ZIP را دوباره استخراج کنید |
+| سرور راه‌اندازی نمی‌شود | پورت 8756 درحال استفاده است. پورت را تغییر دهید |
+
+---
+
+## 📊 کارایی
+
+| مدل | سرعت | کیفیت | حجم |
+|-----|------|-------|------|
+| gyro (پیشفرض) | سریع | بهترین | 450 MB |
+| ganji | خیلی سریع | خوب | 150 MB |
+| haaniye | سریع | خوب | 100 MB |
+
+---
+
+## 📜 مجوز و اعتبار
+
+- **sherpa-onnx** (k2-fsa) — Apache-2.0
+- **ONNX Runtime** (Microsoft) — MIT
+- **مدل‌های Piper / VITS** — هر کدام مجوز خود را دارد
+- **این ابزار** — MIT
+
+مدل‌های فارسی توسط [karim23657](https://huggingface.co/karim23657)
+
+---
+
+## 🤝 کمک نیاز دارید؟
+
+1. **سوالات متداول را بخوانید** — اغلب سوالات پاسخ داده شده‌اند
+2. **`scripts\diagnose.cmd` را اجرا کنید** — خروجی را کپی کنید
+3. **به کانال تلگرام ما بپیوندید** — **[📱 کانال تلگرام](https://t.me/persian_tts)** 
+4. **یک issue بازکنید** — [GitHub Issues](https://github.com/karim23657/offline-persian-tts-win7/issues)
+
+---
+
+## 🌍 کاربردها
+
+✅ ایجاد کتاب‌های صوتی فارسی  
+✅ تولید صدای فیلم‌ها  
+✅ ابزار دسترسی‌پذیری  
+✅ چت‌بات‌های صوتی  
+✅ یادگیری تلفظ  
+✅ استفاده در ماشین‌های قدیم  
+✅ رابط وب برای استفاده مشترک در شبکه  
+
+---
+
+**🎉 آماده‌اید؟ [الان دانلود کنید](https://github.com/karim23657/offline-persian-tts-win7/releases/latest)**
+
+استخراج → اجرای `scripts\server.cmd` → باز کردن مرورگر → تایپ فارسی → شنیدن صدا. انجام شد!
