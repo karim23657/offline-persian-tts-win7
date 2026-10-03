@@ -91,9 +91,14 @@ def main():
             shutil.copytree(src, os.path.join(root, name),
                             ignore=shutil.ignore_patterns("*.wav", "__pycache__"))
     for name in INCLUDED_FILES:
-        src = os.path.join(REPO, name)
-        if os.path.isfile(src):
-            shutil.copy2(src, os.path.join(root, name))
+        # how_to.md / win7.md live in docs/, the rest at the root; look in both
+        # so a moved file cannot silently drop out of the archive while
+        # START-HERE still points at it.
+        for candidate in (os.path.join(REPO, name),
+                          os.path.join(REPO, "docs", name)):
+            if os.path.isfile(candidate):
+                shutil.copy2(candidate, os.path.join(root, name))
+                break
     os.makedirs(os.path.join(root, "models"), exist_ok=True)
     with open(os.path.join(root, "START-HERE.txt"), "w", encoding="utf-8") as fh:
         fh.write(START_HERE)

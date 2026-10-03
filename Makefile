@@ -27,7 +27,7 @@ COMMON_LIBS:= -lkernel32 -static-libgcc
 CAPI_LIB   := -L$(RUNTIME) -lsherpa-onnx-c-api
 GUI_LIBS   := $(CAPI_LIB) -lcomctl32 -lwinmm -lshell32 -luuid -lole32
 
-.PHONY: all deps shim say gui diag server runtime test release upgrade clean distclean help
+.PHONY: all deps shim say gui diag server runtime test release upgrade clean distclean help FORCE
 
 all: runtime
 
@@ -104,7 +104,8 @@ say: $(RUNTIME)/say.exe
 
 $(RUNTIME)/tts_gui.exe: $(SRC)/gui/gui.c $(RUNTIME)/sherpa-onnx-c-api.dll
 	@echo "==> compiling tts_gui.exe"
-	@$(CC) -O2 -Wall -mwindows -municode -o $@ $< -I$(SHERPA)/include $(GUI_LIBS)
+	@$(CC) -O2 -Wall -mwindows -municode -o $@ $< $(SRC)/engine/tts_engine.c \
+	      -I$(SHERPA)/include -I$(SRC)/engine $(GUI_LIBS)
 
 gui: $(RUNTIME)/tts_gui.exe
 
@@ -148,9 +149,14 @@ runtime: $(RUNTIME)/.patched $(RUNTIME)/say.exe $(RUNTIME)/tts_gui.exe \
 # superset shim is built for the test; the shipped one stays minimal.
 TEST_SHIM := $(BUILD)/shim/w7shim-test.dll
 
-$(BUILD)/shim/test_shim.exe: $(SRC)/shim/test/test_shim.c
+# Always rebuild: the test exe is patched in place, so a stale one would no
+# longer import KERNEL32.dll and the scanner/patcher would (correctly) refuse.
+$(BUILD)/shim/test_shim.exe: $(SRC)/shim/test/test_shim.c FORCE
 	@mkdir -p $(BUILD)/shim
+	@rm -f $@
 	@$(CC) -O2 -Wall -I$(SRC)/shim -o $@ $<
+
+FORCE:
 
 $(TEST_SHIM): $(SHIM_SRC) $(SRC)/shim/win7shim.h $(BUILD)/shim/test_shim.exe \
               $(SRC)/shim/scan_imports.py $(SRC)/shim/imports.txt
@@ -165,7 +171,11 @@ $(TEST_SHIM): $(SHIM_SRC) $(SRC)/shim/win7shim.h $(BUILD)/shim/test_shim.exe \
 	      $(BUILD)/shim-test/win7shim_table.c $(BUILD)/shim-test/win7shim_thunks.S \
 	      $(BUILD)/shim-test/win7shim.def $(COMMON_LIBS)
 
-test: $(BUILD)/shim/test_shim.exe $(TEST_SHIM)
+$(BUILD)/json_test.exe: $(SRC)/server/test/test_json_min.c $(SRC)/server/json_min.c
+	@mkdir -p $(BUILD)
+	@$(CC) -O2 -Wall -I$(SRC)/server -o $@ $^ -lm
+
+test: $(BUILD)/shim/test_shim.exe $(TEST_SHIM) $(BUILD)/json_test.exe
 	@echo "==> patching the self-test"
 	@# The test LoadLibraryA()s "w7shim.dll", so give the superset shim that
 	@# name here; it is a superset of the shipped one, so it is equivalent for
@@ -173,9 +183,17 @@ test: $(BUILD)/shim/test_shim.exe $(TEST_SHIM)
 	@cp -f $(TEST_SHIM) $(BUILD)/shim/w7shim.dll
 	@$(PY) $(SRC)/shim/patch_pe.py $(BUILD)/shim/test_shim.exe \
 	      --inplace --shim $(BUILD)/shim/w7shim.dll >/dev/null
-	@echo "==> running self-test (needs wine)"
+	@echo "==> running shim self-test (needs wine)"
 	@WINEPREFIX=$${WINEPREFIX:-/tmp/wp7} WINEDEBUG=-all \
 	  wine $(BUILD)/shim/test_shim.exe 2>/dev/null | tr -d '\000'
+	@echo "==> running JSON helper test"
+	@WINEPREFIX=$${WINEPREFIX:-/tmp/wp7} WINEDEBUG=-all \
+	  wine $(BUILD)/json_test.exe 2>/dev/null | tr -d '\000'
+	@# End-to-end over real HTTP.  This is the test that catches a server which
+	@# answers 200 while never reading the request body - a failure the unit
+	@# tests above cannot see.
+	@echo "==> running HTTP API smoke test"
+	@$(PY) scripts/api_smoke_test.py --port $${API_TEST_PORT:-8799}
 
 # ---------------------------------------------------------------- release
 release: runtime

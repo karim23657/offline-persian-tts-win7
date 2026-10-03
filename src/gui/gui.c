@@ -29,6 +29,7 @@
 #include <string.h>
 
 #include "sherpa-onnx/c-api/c-api.h"
+#include "tts_engine.h"
 
 #ifndef IDC_ARROW
 #define IDC_ARROW 32512
@@ -103,28 +104,6 @@ static char *utf16_to_utf8(const wchar_t *in) {
 
 /* --------------------------------------------------------- model listing */
 
-/* Find the first .onnx in dir; returns 0 on success. */
-static int find_model_file(const wchar_t *dir, wchar_t *out, size_t cap) {
-    WIN32_FIND_DATAW fd;
-    HANDLE h;
-    wchar_t pattern[MAX_PATHLEN];
-    int found = 0;
-
-    _snwprintf(pattern, MAX_PATHLEN, L"%s\\*.onnx", dir);
-    h = FindFirstFileW(pattern, &fd);
-    if (h != INVALID_HANDLE_VALUE) {
-        do {
-            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                _snwprintf(out, cap, L"%s\\%s", dir, fd.cFileName);
-                found = 1;
-                break;
-            }
-        } while (FindNextFileW(h, &fd));
-        FindClose(h);
-    }
-    return found ? 0 : -1;
-}
-
 /* Every subdirectory of models\ that holds a .onnx is offered in the combo. */
 static void populate_models(App *app) {
     wchar_t base[MAX_PATHLEN];
@@ -174,122 +153,121 @@ static void populate_models(App *app) {
  * Build the engine from a model directory.  Mirrors say.exe so both front ends
  * behave identically.
  */
-static const SherpaOnnxOfflineTts *create_engine(const wchar_t *model_dir,
-                                                 float length_scale,
-                                                 int *num_threads) {
-    char narrow_dir[MAX_PATHLEN], tokens[MAX_PATHLEN], data_dir[MAX_PATHLEN];
-    wchar_t probe[MAX_PATHLEN];
-    SherpaOnnxOfflineTtsVitsModelConfig vits;
-    SherpaOnnxOfflineTtsModelConfig model;
-    SherpaOnnxOfflineTtsConfig config;
-    SYSTEM_INFO si;
-    int n;
+/*
+ * Synthesis worker.
+ *
+ * The engine comes from the shared cache in tts_engine.c, so it stays loaded and
+ * warm between generations.  It used to be rebuilt on *every* click, and
+ * loading the 63 MB model dominated the wait - now only the very first
+ * generation pays that cost, and it can be paid up front by --preload.
+ */
 
-    if (find_model_file(model_dir, probe, MAX_PATHLEN) != 0) return NULL;
+typedef struct {
+    App *app;
+    float *samples;      /* collected so the wav can be written at the end */
+    int count;
+    int cap;
+} ProgressCtx;
 
-    n = WideCharToMultiByte(CP_UTF8, 0, probe, -1, narrow_dir, MAX_PATHLEN, NULL, NULL);
-    if (n <= 0) return NULL;
-
-    {
-        wchar_t w[MAX_PATHLEN];
-        _snwprintf(w, MAX_PATHLEN, L"%s\\tokens.txt", model_dir);
-        n = WideCharToMultiByte(CP_UTF8, 0, w, -1, tokens, MAX_PATHLEN, NULL, NULL);
-        if (n <= 0) return NULL;
+/*
+ * Matches TtsSampleSink (samples, count, progress, user).  It does two jobs:
+ * forward progress to the UI thread, and collect the samples so the worker can
+ * write the .wav once generation has finished.
+ */
+static void on_samples(const float *samples, int count, float progress, void *user) {
+    ProgressCtx *ctx = (ProgressCtx *)user;
+    if (count > 0) {
+        if (ctx->count + count > ctx->cap) {
+            int cap = ctx->cap ? ctx->cap : 65536;
+            float *grown;
+            while (cap < ctx->count + count) cap *= 2;
+            grown = (float *)realloc(ctx->samples, (size_t)cap * sizeof(float));
+            if (grown) {
+                ctx->samples = grown;
+                ctx->cap = cap;
+            }
+        }
+        if (ctx->count + count <= ctx->cap) {
+            memcpy(ctx->samples + ctx->count, samples, (size_t)count * sizeof(float));
+            ctx->count += count;
+        }
     }
-
-    _snwprintf(probe, MAX_PATHLEN, L"%s\\espeak-ng-data\\phontab", model_dir);
-    if (GetFileAttributesW(probe) != INVALID_FILE_ATTRIBUTES) {
-        _snwprintf(probe, MAX_PATHLEN, L"%s\\espeak-ng-data", model_dir);
-    } else {
-        wcscpy(probe, L"espeak-ng-data");
-    }
-    n = WideCharToMultiByte(CP_UTF8, 0, probe, -1, data_dir, MAX_PATHLEN, NULL, NULL);
-    if (n <= 0) return NULL;
-
-    GetSystemInfo(&si);
-    *num_threads = (int)si.dwNumberOfProcessors;
-    if (*num_threads > 4) *num_threads = 4;
-    if (*num_threads < 1) *num_threads = 1;
-
-    memset(&vits, 0, sizeof(vits));
-    vits.model = narrow_dir;
-    vits.lexicon = "";
-    vits.tokens = tokens;
-    vits.data_dir = data_dir;
-    vits.dict_dir = "";
-    vits.noise_scale = 0.667f;
-    vits.noise_scale_w = 0.8f;
-    vits.length_scale = length_scale;
-
-    memset(&model, 0, sizeof(model));
-    model.vits = vits;
-    model.num_threads = *num_threads;
-    model.debug = 0;
-    model.provider = "cpu";
-
-    memset(&config, 0, sizeof(config));
-    config.model = model;
-    config.rule_fsts = "";
-    config.max_num_sentences = 2;
-
-    return SherpaOnnxCreateOfflineTts(&config);
+    PostMessageW(ctx->app->hwnd, WM_APP_PROG, (WPARAM)(int)(progress * 100.0f), 0);
 }
 
-/* Progress callback: marshal a percentage back to the status bar. */
-static int32_t WINAPI progress_cb(const float *samples, int32_t n, float p, void *arg) {
-    App *app = (App *)arg;
-    (void)samples;
-    (void)n;
-    PostMessageW(app->hwnd, WM_APP_PROG, (WPARAM)(int)(p * 100.0f), 0);
-    return 1;
-}
-
-/* Runs on the worker thread.  Never touches UI state directly. */
 static DWORD WINAPI worker(LPVOID param) {
     Job *job = (Job *)param;
-    const SherpaOnnxOfflineTts *tts;
-    SherpaOnnxGenerationConfig gen;
-    const SherpaOnnxGeneratedAudio *audio;
-    int threads = 2;
+    TtsEngine *engine;
+    ProgressCtx pctx;
+    wchar_t werr[512];
+    int n_samples = 0;
+    char err[512];
 
-    tts = create_engine(job->app->model_dir, job->length_scale, &threads);
-    if (!tts) {
-        PostMessageW(job->app->hwnd, WM_APP_FAIL, 0, (LPARAM)L"Could not load the model.");
+    memset(&pctx, 0, sizeof(pctx));
+    pctx.app = job->app;
+
+    engine = TtsEngineAcquire(job->app->model_dir, werr,
+                              sizeof(werr) / sizeof(werr[0]));
+    if (!engine) {
+        PostMessageW(job->app->hwnd, WM_APP_FAIL, 0, (LPARAM)werr);
         free(job);
         return 1;
     }
 
-    memset(&gen, 0, sizeof(gen));
-    gen.sid = job->sid;
-    gen.speed = job->speed;
-    gen.silence_scale = 0.2f;
-
-    audio = SherpaOnnxOfflineTtsGenerateWithConfig(tts, job->text_utf8, &gen,
-                                                    progress_cb, job->app);
-    if (!audio || audio->n <= 0) {
-        SherpaOnnxDestroyOfflineTts(tts);
+    if (!TtsEngineGenerate(engine, job->text_utf8, job->speed, job->sid,
+                           on_samples, &pctx, &n_samples, err, sizeof(err))) {
+        TtsEngineTouch(engine);
+        TtsEngineRelease();
         PostMessageW(job->app->hwnd, WM_APP_FAIL, 0, (LPARAM)L"No audio was produced.");
         free(job);
         return 1;
     }
 
-    job->sample_rate = audio->sample_rate;
-    job->seconds = (double)audio->n / (double)audio->sample_rate;
+    job->sample_rate = TtsEngineSampleRate(job->app->model_dir);
+    if (job->sample_rate <= 0) job->sample_rate = 22050;
+    if (n_samples <= 0) n_samples = pctx.count;
+    job->seconds = (double)n_samples / (double)job->sample_rate;
 
-    if (!SherpaOnnxWriteWave(audio->samples, audio->n, audio->sample_rate,
+    TtsEngineTouch(engine);
+    TtsEngineRelease();   /* release the generation lock Acquire took */
+
+    /*
+     * Write the file here, on the worker thread, and only report success once
+     * the audio is really on disk.  Doing it later (or not at all) makes the
+     * status bar claim a file exists when it does not.
+     */
+    if (!SherpaOnnxWriteWave(pctx.samples, n_samples, job->sample_rate,
                              job->wav_narrow)) {
-        SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
-        SherpaOnnxDestroyOfflineTts(tts);
-        PostMessageW(job->app->hwnd, WM_APP_FAIL, 0, (LPARAM)L"Could not write the .wav file.");
+        free(pctx.samples);
+        PostMessageW(job->app->hwnd, WM_APP_FAIL, 0,
+                     (LPARAM)L"Could not write the .wav file.");
         free(job);
         return 1;
     }
+    free(pctx.samples);
 
-    SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
-    SherpaOnnxDestroyOfflineTts(tts);
     PostMessageW(job->app->hwnd, WM_APP_DONE, 0, (LPARAM)job);
     return 0;
 }
+
+/*
+ * Load a model in the background so the first Generate feels instant.
+ * Failures are ignored here: the real Generate will report them properly.
+ */
+static DWORD WINAPI preload_thread(LPVOID param) {
+    App *app = (App *)param;
+    wchar_t werr[512];
+    TtsEngine *engine = TtsEngineAcquire(app->model_dir, werr, 512);
+    if (engine) {
+        TtsEngineTouch(engine);
+    }
+    TtsEngineRelease();
+    return 0;
+}
+
+
+/* Defined with the worker below; declared here so WM_CREATE can start it. */
+static DWORD WINAPI preload_thread(LPVOID param);
 
 /* -------------------------------------------------------------------- UI  */
 
@@ -576,10 +554,17 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)app);
         create_controls(app, (HINSTANCE)GetWindowLongPtrW(hwnd, GWLP_HINSTANCE));
         populate_models(app);
+        TtsEngineInit();
         layout(app, 760, 520);
         set_controls_enabled(app, 0);
         set_status(app, L"Ready. Type Persian or any other text and press Generate.");
         SetFocus(app->edit);
+        /*
+         * Load the default model in the background straight away.  The window
+         * is usable immediately and the first Generate does not have to wait
+         * for a 63 MB model to come off disk.
+         */
+        CreateThread(NULL, 0, preload_thread, app, 0, NULL);
         return 0;
     }
 
@@ -648,6 +633,11 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_APP_DONE: {
         Job *job = (Job *)lp;
+
+        if (!job) {   /* background preload finished */
+            set_status(app, L"Ready - the model is loaded and warm.");
+            return 0;
+        }
         wchar_t msg[MAX_PATHLEN + 128];
         if (!app) break;
         SendMessageW(app->progress, PBM_SETPOS, 100, 0);
