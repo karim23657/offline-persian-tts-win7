@@ -55,6 +55,19 @@ jobs:
       - name: Build
         run: make
 
+      # The model is deliberately not committed (79 MB, and it has its own
+      # licence), but both 'make test' and the Persian audio step below refuse
+      # to pass without one.  scripts\get_model.cmd is a .cmd and cannot run on
+      # Linux, so fetch the same tarball it would and unpack it here.
+      - name: Fetch the Persian model
+        run: |
+          set -euo pipefail
+          url="https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-fa_IR-gyro-medium.tar.bz2"
+          curl -L --fail --silent --show-error -o /tmp/gyro.tar.bz2 "$url"
+          mkdir -p models
+          tar -xjf /tmp/gyro.tar.bz2 -C models
+          test -d models/vits-piper-fa_IR-gyro-medium
+
       - name: Shim self-test
         run: make test
 
