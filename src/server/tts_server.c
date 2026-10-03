@@ -174,8 +174,9 @@ typedef struct {
     int sample_rate;
 } SynthCtx;
 
-static void on_samples(const float *samples, int count, void *user) {
+static void on_samples(const float *samples, int count, float progress, void *user) {
     SynthCtx *ctx = (SynthCtx *)user;
+    (void)progress;
     wav_push_samples(&ctx->wav, samples, (size_t)count);
 }
 

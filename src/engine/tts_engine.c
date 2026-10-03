@@ -313,10 +313,9 @@ typedef struct {
 static int32_t WINAPI engine_on_samples(const float *samples, int32_t n,
                                         float progress, void *arg) {
     GenCtx *ctx = (GenCtx *)arg;
-    (void)progress;
     if (ctx) {
         ctx->called = 1;
-        if (ctx->sink) ctx->sink(samples, (int)n, ctx->user);
+        if (ctx->sink) ctx->sink(samples, (int)n, progress, ctx->user);
     }
     return 1;
 }
@@ -355,7 +354,7 @@ int TtsEngineGenerate(TtsEngine *engine, const char *text, float speed, int sid,
      * unconditionally would append the same samples twice.
      */
     if (sink && audio->n > 0 && !ctx.called) {
-        sink(audio->samples, (int)audio->n, user);
+        sink(audio->samples, (int)audio->n, 1.0f, user);
     }
     if (out_samples) *out_samples = audio->n;
     if (getenv("WIN7TTS_DEBUG")) {

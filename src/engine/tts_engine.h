@@ -65,9 +65,12 @@ int TtsEngineSampleRate(const wchar_t *model_dir);
 
 /*
  * Sink for generated samples, so callers (e.g. the WAV writer) can consume
- * audio as it is produced instead of only at the end.
+ * audio as it is produced instead of only at the end.  Deliberately mirrors
+ * the engine's own progress callback - samples, count, progress, user - so the
+ * two can never be confused for one another.
  */
-typedef void (*TtsSampleSink)(const float *samples, int count, void *user);
+typedef void (*TtsSampleSink)(const float *samples, int count, float progress,
+                              void *user);
 
 /*
  * Synthesise UTF-8 `text`.  Samples are pushed to `sink` as they arrive.
