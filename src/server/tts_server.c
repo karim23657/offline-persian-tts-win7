@@ -21,9 +21,19 @@
  *   GET  /                 the single-page UI
  *   GET  /api/health       status, uptime, how many models are resident
  *   GET  /api/models       installed models, with a "loaded" flag
+ *   GET  /api/catalog      models.json - everything available to download
+ *   GET  /api/help         this list, as plain text
+ *   GET  /api/dict         the pronunciation dictionary (user.dict)
+ *   POST /api/dict         add {"word":..,"repl":..} or {"word":..,"delete":true}
  *   POST /api/warmup       load a model now and return how long it took
+ *   POST /api/unload       free resident models: {} = all, {"keep":m} = all but
+ *                          m, {"model":m} = just m (used on pagehide)
  *   POST /api/synthesize   JSON in, WAV out
  *   GET  /api/synthesize   same, but query parameters (handy for <audio src>)
+ *
+ * Connections are HTTP/1.1 with keep-alive: one socket serves a whole browser
+ * session (bounded at 200 requests or 15 s idle), instead of one TCP
+ * handshake per click.
  *
  * Security
  * --------
@@ -41,6 +51,7 @@
 #include <string.h>
 
 #include "tts_engine.h"
+#include "dict.h"
 #include "http_min.h"
 #include "json_min.h"
 #include "wav_writer.h"
@@ -165,6 +176,12 @@ static int resolve_model(const char *want, wchar_t *out, size_t cap) {
         return 1;
     }
     return 0;
+}
+
+/* The pronunciation dictionary lives next to models.json, i.e. at the package
+   root (<models dir>\..\user.dict), so GUI, server and CLI share one file. */
+static void user_dict_path(wchar_t *out, size_t cap) {
+    _snwprintf(out, cap, L"%s\\..\\user.dict", g_models_dir);
 }
 
 /* --------------------------------------------------------------- synthesis */
@@ -407,6 +424,20 @@ static void handle_synthesize(HttpConn *conn, const HttpRequest *req) {
     if (!json_get_int(json, "sid", &sid)) sid = 0;
     if (speed <= 0.3 || speed > 3.0) speed = 1.0;
 
+    /* Pronunciation dictionary: substitute words before synthesis.  Reloaded
+       per request on purpose - the file is a few hundred bytes, and that way
+       an entry added in the GUI applies to the very next web request. */
+    {
+        wchar_t dpath[MAX_PATHLEN];
+        user_dict_path(dpath, MAX_PATHLEN);
+        if (DictLoad(dpath) == 0 && DictCount() > 0) {
+            int hits = DictApply(text, sizeof(text));
+            if (hits && getenv("WIN7TTS_DEBUG")) {
+                logf_("  dictionary: %d substitution(s)", hits);
+            }
+        }
+    }
+
     if (!resolve_model(model, model_dir, MAX_PATHLEN)) {
         send_json_error(conn, 404, "no model installed; run scripts\\get_model.cmd gyro");
         return;
@@ -436,6 +467,177 @@ static void handle_synthesize(HttpConn *conn, const HttpRequest *req) {
     free(wav);
 }
 
+/* Free resident models - the "offload" half of the model-switch policy. */
+static void handle_unload(HttpConn *conn, const HttpRequest *req) {
+    char model[512] = "", keep[512] = "";
+    char body[256];
+    int n = 0;
+    const char *json = (req->body && req->body_len) ? req->body : "{}";
+
+    json_get_string(json, "model", model, sizeof(model));
+    json_get_string(json, "keep", keep, sizeof(keep));
+
+    if (model[0]) {
+        /* Exact folder name only: unloading must never fall back to "the
+           first model" the way synthesize does - that would free the wrong
+           session.  A non-resident path is a no-op (returns 0). */
+        wchar_t wname[512], path[MAX_PATHLEN];
+        if (MultiByteToWideChar(CP_UTF8, 0, model, -1, wname, 512) > 0) {
+            _snwprintf(path, MAX_PATHLEN, L"%s\\%s", g_models_dir, wname);
+            n = TtsEngineEvict(path);
+        }
+    } else {
+        wchar_t wkeep[MAX_PATHLEN];
+        wkeep[0] = 0;
+        if (keep[0]) {
+            wchar_t wname[512];
+            if (MultiByteToWideChar(CP_UTF8, 0, keep, -1, wname, 512) > 0) {
+                _snwprintf(wkeep, MAX_PATHLEN, L"%s\\%s", g_models_dir, wname);
+            }
+        }
+        n = TtsEngineEvictOthers(wkeep);
+    }
+    snprintf(body, sizeof(body), "{\"unloaded\":%d,\"resident\":%d}",
+             n, TtsEngineResidentCount());
+    http_send_full(conn, 200, "application/json; charset=utf-8", body, strlen(body));
+    if (!g_quiet) {
+        logf_("  unloaded %d model(s), %d resident", n, TtsEngineResidentCount());
+    }
+}
+
+/* Serve models.json, so the web UI can show what is available to download
+   without duplicating the catalogue anywhere else. */
+static void handle_catalog(HttpConn *conn) {
+    wchar_t path[MAX_PATHLEN];
+    FILE *f;
+    long size;
+    char *buf;
+
+    _snwprintf(path, MAX_PATHLEN, L"%s\\..\\models.json", g_models_dir);
+    f = _wfopen(path, L"rb");
+    if (!f) {
+        send_json_error(conn, 404, "models.json not found (see the program folder)");
+        return;
+    }
+    fseek(f, 0, SEEK_END);
+    size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size < 0 || size > 4 * 1024 * 1024) {
+        fclose(f);
+        send_json_error(conn, 500, "models.json is empty or too large");
+        return;
+    }
+    buf = (char *)malloc((size_t)size + 1);
+    if (!buf) {
+        fclose(f);
+        send_json_error(conn, 500, "out of memory");
+        return;
+    }
+    if (fread(buf, 1, (size_t)size, f) != (size_t)size) {
+        free(buf);
+        fclose(f);
+        send_json_error(conn, 500, "could not read models.json");
+        return;
+    }
+    fclose(f);
+    buf[size] = 0;
+    http_send_full(conn, 200, "application/json; charset=utf-8", buf, (size_t)size);
+    free(buf);
+}
+
+/* GET lists the dictionary; POST adds/replaces or deletes an entry and
+   writes user.dict, so the GUI's dictionary tab and the web stay in step. */
+static void handle_dict(HttpConn *conn, const HttpRequest *req, int is_get) {
+    wchar_t path[MAX_PATHLEN];
+    char *body;
+    size_t cap = 8192, len = 0;
+    int i, first = 1;
+
+    user_dict_path(path, MAX_PATHLEN);
+
+    if (!is_get) {
+        char word[DICT_MAX_WORD] = "", repl[DICT_MAX_REPL] = "";
+        const char *json = (req->body && req->body_len) ? req->body : "{}";
+        const char *del_flag = json_find(json, "delete");
+        char out[128];
+
+        DictLoad(path);
+        if (!json_get_string(json, "word", word, sizeof(word)) || !word[0]) {
+            send_json_error(conn, 400, "expected {\"word\":..., \"repl\":...}");
+            return;
+        }
+        if (del_flag && (*del_flag == 't' || *del_flag == '1')) {
+            DictRemove(word);
+        } else {
+            if (!json_get_string(json, "repl", repl, sizeof(repl)) || !repl[0]) {
+                send_json_error(conn, 400, "expected {\"word\":..., \"repl\":...}");
+                return;
+            }
+            if (!DictSet(word, repl)) {
+                send_json_error(conn, 400, "entry too long or dictionary is full");
+                return;
+            }
+        }
+        if (DictSave(path) != 0) {
+            send_json_error(conn, 500, "could not write user.dict");
+            return;
+        }
+        snprintf(out, sizeof(out), "{\"count\":%d}", DictCount());
+        http_send_full(conn, 200, "application/json; charset=utf-8",
+                       out, strlen(out));
+        return;
+    }
+
+    DictLoad(path);
+    body = (char *)malloc(cap);
+    if (!body) { send_json_error(conn, 500, "out of memory"); return; }
+    len += (size_t)snprintf(body + len, cap - len, "{\"entries\":[");
+    for (i = 0; i < DictCount(); ++i) {
+        const DictEntry *e = DictGet(i);
+        char ew[4 * DICT_MAX_WORD], er[4 * DICT_MAX_REPL];
+        char sw[4 * DICT_MAX_WORD + 16], sr[4 * DICT_MAX_REPL + 16];
+        if (!e) break;
+        json_escape(e->word, ew, sizeof(ew));
+        json_escape(e->repl, er, sizeof(er));
+        snprintf(sw, sizeof(sw), "\"word\":\"%s\"", ew);
+        snprintf(sr, sizeof(sr), "\"repl\":\"%s\"", er);
+        if (len + strlen(sw) + strlen(sr) + 8 >= cap) break;
+        len += (size_t)snprintf(body + len, cap - len, "%s{%s,%s}",
+                                first ? "" : ",", sw, sr);
+        first = 0;
+    }
+    snprintf(body + len, cap - len, "]}");
+    http_send_full(conn, 200, "application/json; charset=utf-8", body, strlen(body));
+    free(body);
+}
+
+/* Documentation you can curl: every route, every parameter, one line each. */
+static void handle_help(HttpConn *conn) {
+    static const char help[] =
+        "win7-tts HTTP API\n"
+        "=================\n"
+        "\n"
+        "GET  /api/health      JSON status: uptime, installed/loaded models\n"
+        "GET  /api/models      installed models: [{\"name\":..,\"loaded\":..}]\n"
+        "GET  /api/catalog     models.json - every model available to download\n"
+        "GET  /api/help        this text\n"
+        "GET  /api/dict        pronunciation dictionary (user.dict) entries\n"
+        "POST /api/dict        add:    {\"word\":\"..\",\"repl\":\"..\"}\n"
+        "                      delete: {\"word\":\"..\",\"delete\":true}\n"
+        "POST /api/warmup      {\"model\":\"name\"} -> loads it, reports ms\n"
+        "POST /api/unload      free memory: {} = everything,\n"
+        "                      {\"keep\":\"name\"} = everything but that model,\n"
+        "                      {\"model\":\"name\"} = just that model.\n"
+        "                      The web UI calls this when the page closes.\n"
+        "POST /api/synthesize  {\"text\":\"..\",\"model\":\"name\",\"speed\":1.0,\n"
+        "                      \"sid\":0} -> audio/wav\n"
+        "GET  /api/synthesize?text=..  same via query string (for <audio src>)\n"
+        "\n"
+        "Synthesis honours user.dict (word substitution) when present.\n"
+        "Connections: HTTP/1.1 keep-alive, max 200 requests / 15 s idle.\n";
+    http_send_full(conn, 200, "text/plain; charset=utf-8", help, sizeof(help) - 1);
+}
+
 static void route(HttpConn *conn, HttpRequest *req) {
     int is_post = (strcmp(req->method, "POST") == 0);
     int is_get = (strcmp(req->method, "GET") == 0);
@@ -453,6 +655,32 @@ static void route(HttpConn *conn, HttpRequest *req) {
     if (strcmp(req->path, "/api/warmup") == 0) {
         if (!is_post) { http_send_status(conn, 405, "text/plain", "POST only"); return; }
         handle_warmup(conn, req);
+        return;
+    }
+    if (strcmp(req->path, "/api/unload") == 0) {
+        if (!is_post) { http_send_status(conn, 405, "text/plain", "POST only"); return; }
+        handle_unload(conn, req);
+        return;
+    }
+    if (strcmp(req->path, "/api/catalog") == 0) {
+        if (!is_get) { http_send_status(conn, 405, "text/plain", "GET only"); return; }
+        handle_catalog(conn);
+        return;
+    }
+    if (strcmp(req->path, "/api/dict") == 0) {
+        if (!is_get && !is_post) {
+            http_send_status(conn, 405, "text/plain", "GET or POST only");
+            return;
+        }
+        handle_dict(conn, req, is_get);
+        return;
+    }
+    if (strcmp(req->path, "/api/help") == 0) {
+        if (!is_get && !is_post) {
+            http_send_status(conn, 405, "text/plain", "GET or POST only");
+            return;
+        }
+        handle_help(conn);
         return;
     }
     if (strcmp(req->path, "/api/synthesize") == 0) {
@@ -475,32 +703,81 @@ static void route(HttpConn *conn, HttpRequest *req) {
     http_send_status(conn, 404, "text/plain", "no such endpoint");
 }
 
-static void serve_connection(int listener) {
-    HttpConn conn;
+/*
+ * One thread per connection.
+ *
+ * Keep-alive means a client can sit idle *between* requests, and the old
+ * sequential accept loop would stall every other client behind that idle
+ * socket - browsers open several connections at once and would have queued
+ * for up to the idle timeout each.  Threads only overlap on I/O: synthesis
+ * is serialised inside the engine cache, so this buys concurrency for
+ * waiting, not for CPU.
+ *
+ * The HttpConn is heap-allocated at accept time and owned by the thread
+ * from here on (copied by value, so the accept loop can allocate the next).
+ */
+static DWORD WINAPI connection_thread(LPVOID param) {
+    HttpConn conn = *(HttpConn *)param;
     HttpRequest req;
-    int rc;
+    int rc, served = 0;
 
-    if (!http_accept(listener, &conn)) return;
+    free(param);
 
-    /* Give a slow or broken client a bounded window, then drop it. */
+    /*
+     * Bounded windows: a keep-alive connection idles out after 15 s (the
+     * value advertised in its Keep-Alive header), and a slow or broken
+     * client can never wedge the server.
+     *
+     * Windows' SO_RCVTIMEO/SO_SNDTIMEO take a DWORD of *milliseconds* - not
+     * the POSIX struct timeval.  Passing a timeval here (as this code did
+     * before keep-alive existed) truncated to 15 *milliseconds*, so any gap
+     * between two requests longer than a rounding error ended the
+     * connection.  Single-read-per-connection never noticed; a browser does.
+     */
     {
-        struct timeval tv;
-        tv.tv_sec = 20;
-        tv.tv_usec = 0;
-        setsockopt(conn.sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof(tv));
-        setsockopt(conn.sock, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof(tv));
+        DWORD timeout_ms = 15000;
+        setsockopt(conn.sock, SOL_SOCKET, SO_RCVTIMEO,
+                   (const char *)&timeout_ms, sizeof(timeout_ms));
+        setsockopt(conn.sock, SOL_SOCKET, SO_SNDTIMEO,
+                   (const char *)&timeout_ms, sizeof(timeout_ms));
     }
 
-    rc = http_read_request(&conn, &req);
-    if (rc == 1) {
+    for (;;) {
+        rc = http_read_request(&conn, &req);
+        if (getenv("WIN7TTS_DEBUG")) {
+            fprintf(stderr, "  read -> rc=%d wserr=%d\n", rc,
+                    (rc == 1) ? 0 : WSAGetLastError());
+            fflush(stderr);
+        }
+        /* Answer the requests that are well-formed but not usable as-is,
+           instead of dropping them with the connection. */
+        if (rc == 2) {
+            http_send_status(&conn, 411, NULL, "Length Required");
+            break;
+        }
+        if (rc == 3) {
+            http_send_status(&conn, 413, NULL, "Payload Too Large");
+            break;
+        }
+        if (rc != 1) break;
+
         InterlockedIncrement(&g_requests);
         logf_("  %s %s (%lu bytes)", req.method, req.path,
               (unsigned long)req.body_len);
+
+        /* Decide for *this* request before routing: the response headers are
+           written inside route(), and they must match this decision. */
+        conn.keep = !req.conn_close && (req.http11 || req.conn_keep10);
         route(&conn, &req);
+        http_free_request(&req);
+
+        if (!conn.keep) break;
+        if (++served >= 200) break;   /* the bound promised in Keep-Alive */
     }
-    http_free_request(&req);
     shutdown(conn.sock, SD_BOTH);
     closesocket(conn.sock);
+    if (conn.pend) free(conn.pend);
+    return 0;
 }
 
 /*
@@ -628,8 +905,23 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show) {
     }
 
     for (;;) {
-        serve_connection(listener);
-        if (g_quiet) continue;
+        HttpConn *c = (HttpConn *)malloc(sizeof(HttpConn));
+        HANDLE th;
+        if (!c) {
+            Sleep(50);      /* out of memory: back off instead of spinning */
+            continue;
+        }
+        if (!http_accept(listener, c)) {
+            free(c);
+            Sleep(10);      /* a failed accept must not turn into a busy loop */
+            continue;
+        }
+        th = CreateThread(NULL, 0, connection_thread, c, 0, NULL);
+        if (th) {
+            CloseHandle(th);
+        } else {
+            connection_thread(c);   /* no thread available: serve inline */
+        }
     }
     return 0;
 }

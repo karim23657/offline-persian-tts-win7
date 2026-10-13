@@ -363,3 +363,66 @@ is deliberate.
 3. **Ship a probe with the product.** `scripts\diagnose.cmd` turned an
    unreproducible crash report into a precise `0xC0000005` and a locatable bug.
    When you cannot reproduce the failure, instrument for the person who can.
+
+---
+
+## 12. v1.1.0 changes (2026-10-13)
+
+A second pass over the package: GUI, web server, CLI and docs all grew real
+features, and two genuine bugs were found and fixed. The full user-facing list
+is in [CHANGELOG.md](../CHANGELOG.md); the parts worth recording here are the
+decisions and the traps.
+
+**Model lifecycle.** Models load once through the engine cache and are reused.
+Switching models (GUI combo, or the web UI) now evicts the previous one
+(`TtsEngineEvict` / `POST /api/unload`), and the web page sends a `pagehide`
+beacon so closing the tab frees the model too. Only the selected model stays
+resident - two 63 MB sessions never sit in memory together by accident.
+
+**Keep-alive + threading.** `tts_server.exe` moved to HTTP/1.1 keep-alive (one
+connection per browser session, bounded at 200 requests / 15 s idle) with a
+thread per connection. A sequential accept loop would have stalled every client
+behind one idle keep-alive socket. Pipelined requests are both read (extra
+bytes are held over, not dropped).
+
+**The dictionary is the honest "phoneme editor".** The sherpa-onnx C API exposes
+no phoneme input for these Piper models (its `lexicon` field is ignored whenever
+`data_dir` is set - always the case here), so a phoneme-level editor is not
+possible. `src/engine/dict.c` implements whole-word substitution applied before
+synthesis, shared by the GUI, the web UI (`/api/dict`) and `say.exe` through one
+package-root `user.dict`. Resist the urge to fake a phoneme tab.
+
+**Two real bugs fixed.**
+
+- `create_engine()` passed an **uninitialised `tokens` buffer** to the engine
+  config (it built `model_onnx` and `data_dir` but never the tokens path). It
+  only worked when the stack slot happened to be zeroed.
+- The server set **`SO_RCVTIMEO` with a POSIX `struct timeval`** (16 bytes)
+  instead of a Windows `DWORD` of milliseconds. Windows truncates to the first
+  4 bytes, so the "20-second" receive timeout was really 20 *milliseconds* -
+  invisible in the old one-read-per-connection design, fatal for keep-alive.
+
+**A GUI trap worth remembering.** Do not derive a static label's control id as
+`"control id - 1"`. `ID_TEXT - 1 == ID_MODEL`, `ID_DICT_HINT == ID_DICT_WORD -
+1`, and so on: `GetDlgItem()` then returns the wrong window and both layout and
+per-tab visibility silently break. Every label now has its own explicit id.
+Relatedly, a Win32 tab control shows nothing until the items are *inserted*
+(`TCM_INSERTITEMW`); `TCM_SETITEMW` on a nonexistent item is a no-op.
+
+**Hand-escaped wide strings are a liability.** The Persian UI strings were first
+written as `\uXXXX`/`\xXXXX` escapes. Two bit rots: `\u200c0631` (a zero-width
+joiner immediately followed by hex digits - `\u` eats exactly four, so `0631`
+became literal text) and one string that rendered empty for no traceable reason.
+They are being replaced with literal UTF-8 Persian in the source, which mingw
+compiles to correct UTF-16 and which a human can actually read. Prefer literal
+text; if you must escape, keep `\u200c` glued to a `\x`/`\u` escape, never a bare
+digit.
+
+**Testing under Wine.** `make test` runs the shim self-test, the JSON helper
+test, `scripts/api_smoke_test.py` (17 checks) and `scripts/protocol_test.py`
+(23 checks). Two operational notes: (1) the shim self-test can hang under a
+degraded Wine prefix - if `make test` stalls there, kill stray `wineserver`/
+`winedevice` processes and run `wine build/shim/test_shim.exe` directly with a
+timeout; (2) never put an unbracketed literal in a `pkill -f` pattern that also
+appears elsewhere in the same command (`pkill -f "[t]ts_gui"` while the command
+also contains `tts_gui.exe` kills your own shell).

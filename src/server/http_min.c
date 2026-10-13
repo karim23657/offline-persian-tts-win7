@@ -7,6 +7,16 @@
 
 #include "http_min.h"
 
+/* Log every read_request outcome when WIN7TTS_DEBUG is set (keep-alive
+   debugging: which path ended a connection). */
+#define DBG_RETURN(v) do { \
+    if (getenv("WIN7TTS_DEBUG")) { \
+        fprintf(stderr, "  http_read_request -> %d (line %d)\n", (int)(v), __LINE__); \
+        fflush(stderr); \
+    } \
+    return (v); \
+} while (0)
+
 #define MAX_BODY      (8 * 1024 * 1024)
 #define MAX_HEADER_BYTES 16384
 
@@ -16,6 +26,7 @@ const char *http_status_text(int status) {
     case 400: return "Bad Request";
     case 404: return "Not Found";
     case 405: return "Method Not Allowed";
+    case 411: return "Length Required";
     case 413: return "Payload Too Large";
     case 500: return "Internal Server Error";
     case 503: return "Service Unavailable";
@@ -79,9 +90,27 @@ int http_accept(int listener, HttpConn *out) {
     SOCKET c = accept((SOCKET)listener, (struct sockaddr *)&peer, &len);
     if (c == INVALID_SOCKET) return 0;
     out->sock = c;
+    out->keep = 0;
+    out->pend = NULL;
+    out->pend_len = 0;
+    out->pend_cap = 0;
     strncpy(out->peer, inet_ntoa(peer.sin_addr), sizeof(out->peer) - 1);
     out->peer[sizeof(out->peer) - 1] = 0;
     return 1;
+}
+
+/* Keep the bytes that arrived past the current request (HTTP pipelining). */
+static void save_pend(HttpConn *conn, const char *data, size_t len) {
+    char *p;
+    if (!len || !data) return;
+    if (len > conn->pend_cap) {
+        p = (char *)realloc(conn->pend, len);
+        if (!p) return;      /* only a keep-alive nicety is lost on OOM */
+        conn->pend = p;
+        conn->pend_cap = len;
+    }
+    memcpy(conn->pend, data, len);
+    conn->pend_len = len;
 }
 
 /*
@@ -100,18 +129,30 @@ int http_read_request(HttpConn *conn, HttpRequest *req) {
     char *headers;
     char *body_start;
 
+    buf[0] = 0;              /* safe to search even before the first recv */
+
     memset(req, 0, sizeof(*req));
     req->content_length = -1;
 
+    /*
+     * Search-then-receive: bytes held over from the previous request
+     * (pipelining) are already in `buf`, so a second request that arrived in
+     * the same TCP segment must be found before asking the socket for more.
+     * `pend` is always carved out of this same buffer, so it always fits.
+     */
+    if (conn->pend_len) {
+        size_t n = conn->pend_len;
+        if (n > sizeof(buf) - 1) n = sizeof(buf) - 1;
+        memcpy(buf, conn->pend, n);
+        used = n;
+        buf[used] = 0;
+        free(conn->pend);
+        conn->pend = NULL;
+        conn->pend_len = conn->pend_cap = 0;
+    }
+
     for (;;) {
         int n;
-        if (used + 1 >= sizeof(buf)) return -1;    /* header block too large */
-        n = recv(conn->sock, buf + used, (int)(sizeof(buf) - used - 1), 0);
-        if (n == 0) return (used == 0) ? 0 : -1;
-        if (n < 0) return -1;
-        used += (size_t)n;
-        buf[used] = 0;
-
         {
             char *crlf = strstr(buf, "\r\n\r\n");
             char *lf = strstr(buf, "\n\n");
@@ -119,11 +160,19 @@ int http_read_request(HttpConn *conn, HttpRequest *req) {
             else if (lf) hdr_end = (size_t)(lf - buf) + 2;
             if (hdr_end) break;
         }
+        if (used + 1 >= sizeof(buf)) DBG_RETURN(-1);    /* header block too large */
+        n = recv(conn->sock, buf + used, (int)(sizeof(buf) - used - 1), 0);
+        /* Clean close, or the idle gap between keep-alive requests running
+           into the read timeout - both are normal ends of a connection. */
+        if (n == 0) DBG_RETURN((used == 0) ? 0 : -1);
+        if (n < 0) DBG_RETURN((used == 0) ? 0 : -1);
+        used += (size_t)n;
+        buf[used] = 0;
     }
 
     /* Split the header block into individual lines. */
     headers = (char *)malloc(hdr_end + 1);
-    if (!headers) return -1;
+    if (!headers) DBG_RETURN(-1);
     memcpy(headers, buf, hdr_end);
     headers[hdr_end] = 0;
 
@@ -142,7 +191,16 @@ int http_read_request(HttpConn *conn, HttpRequest *req) {
         if (eol) *eol = '\r';   /* restore for the header walk */
         if (sscanf(line, "%15s %2047s", req->method, req->path) < 2) {
             free(headers);
-            return -1;
+            DBG_RETURN(-1);
+        }
+        {
+            char ver[16] = "";
+            if (sscanf(line, "%*15s %*2047s %15s", ver) == 1) {
+                if (!strcmp(ver, "HTTP/1.1") || !strncmp(ver, "HTTP/2", 6) ||
+                    !strncmp(ver, "HTTP/3", 6)) {
+                    req->http11 = 1;
+                }
+            }
         }
         len = strlen(req->path);
         if (len && req->path[len - 1] == '?') {
@@ -172,20 +230,32 @@ int http_read_request(HttpConn *conn, HttpRequest *req) {
             line[len] = 0;
             if (_strnicmp(line, "Content-Length:", 15) == 0) {
                 req->content_length = atoi(line + 15);
+            } else if (_strnicmp(line, "Connection:", 11) == 0) {
+                char *v = line + 11;
+                while (*v == ' ' || *v == '\t') v++;
+                if (_strnicmp(v, "close", 5) == 0) req->conn_close = 1;
+                else if (_strnicmp(v, "keep-alive", 10) == 0) req->conn_keep10 = 1;
             }
             p = eol;
         }
     }
     free(headers);
 
-    if (req->content_length > MAX_BODY) return -1;
+    /* Answerable errors get their own codes so the loop can reply properly
+       instead of dropping a well-formed-but-awkward request on the floor. */
+    if (req->content_length > MAX_BODY) DBG_RETURN(3);
+    if (req->content_length < 0 &&
+        (!strcmp(req->method, "POST") || !strcmp(req->method, "PUT"))) {
+        DBG_RETURN(2);   /* body length unknown: the stream cannot stay aligned */
+    }
 
     if (req->content_length > 0) {
-        size_t have = used - hdr_end;
+        size_t avail = used - hdr_end;   /* body bytes already in hand */
+        size_t have = avail;
         size_t need;
         if (have > (size_t)req->content_length) have = (size_t)req->content_length;
         req->body = (char *)malloc((size_t)req->content_length + 1);
-        if (!req->body) return -1;
+        if (!req->body) DBG_RETURN(-1);
         body_start = buf + hdr_end;
         memcpy(req->body, body_start, have);
         need = (size_t)req->content_length - have;
@@ -194,13 +264,20 @@ int http_read_request(HttpConn *conn, HttpRequest *req) {
             if (n <= 0) {
                 free(req->body);
                 req->body = NULL;
-                return -1;
+                DBG_RETURN(-1);
             }
             have += (size_t)n;
             need -= (size_t)n;
         }
         req->body[have] = 0;
         req->body_len = have;
+        /* Whatever arrived past the body is the next pipelined request. */
+        if (avail > (size_t)req->content_length) {
+            save_pend(conn, buf + hdr_end + req->content_length,
+                      avail - (size_t)req->content_length);
+        }
+    } else if (used > hdr_end) {
+        save_pend(conn, buf + hdr_end, used - hdr_end);
     }
     return 1;
 }
@@ -214,17 +291,22 @@ void http_free_request(HttpRequest *req) {
 
 static int send_response_head(HttpConn *conn, int status, const char *content_type,
                               const char *extra) {
-    char head[512];
+    char head[640];
+    /* The connection header follows the *request's* decision, so a keep-alive
+       exchange advertises it (with the idle bound the server actually uses). */
+    const char *conn_hdr = conn->keep
+        ? "Connection: keep-alive\r\nKeep-Alive: timeout=15, max=200\r\n"
+        : "Connection: close\r\n";
     int n = snprintf(head, sizeof(head),
                      "HTTP/1.1 %d %s\r\n"
                      "Content-Type: %s\r\n"
                      "Cache-Control: no-store\r\n"
                      "%s"
-                     "Connection: close\r\n"
+                     "%s"
                      "\r\n",
                      status, http_status_text(status),
                      content_type ? content_type : "text/plain; charset=utf-8",
-                     extra ? extra : "");
+                     extra ? extra : "", conn_hdr);
     return send_all(conn->sock, head, (size_t)n);
 }
 

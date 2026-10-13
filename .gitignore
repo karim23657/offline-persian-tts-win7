@@ -15,6 +15,17 @@ runtime/_diag_*
 # The model is 79 MB. Users fetch it with scripts\get_model.cmd.
 models/
 
+# The pronunciation dictionary is user data, not part of the package: it is
+# created/edited by the GUI, the web UI or say.exe, and lives at the package
+# root next to models.json.
+user.dict
+
+# Other per-user / transient artefacts that land in the package root: the
+# default output wav and the ".part" temp files the model downloader renames
+# into place.
+out.wav
+*.part
+
 # Python
 __pycache__/
 *.pyc

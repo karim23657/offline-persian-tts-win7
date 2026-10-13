@@ -26,6 +26,15 @@ static struct {
 } g_cache;
 
 static DWORD g_tick = 0;
+static volatile LONG g_cancel = 0;
+
+/* Best-effort abort: the UI sets it, the sample callback reports it to
+   sherpa-onnx, and Generate discards the result either way (if the backend
+   ignores the callback result, the caller is still told the truth once it
+   returns).  Reset at the start of each generation. */
+void TtsEngineRequestCancel(void) {
+    InterlockedExchange(&g_cancel, 1);
+}
 
 void TtsEngineInit(void) {
     if (InterlockedCompareExchange(&g_cache.ready, 1, 0) == 0) {
@@ -113,6 +122,10 @@ static const SherpaOnnxOfflineTts *create_engine(const wchar_t *model_dir, float
         _snwprintf(error, errlen, L"tokens.txt is missing from this folder");
         return NULL;
     }
+    /* Build the path for the engine.  This used to be missing: `tokens` went
+       into WideCharToMultiByte uninitialised, so the config carried stack
+       garbage (it only worked when the slot happened to be zeroed). */
+    _snwprintf(tokens, MAX_PATHLEN, L"%s\\tokens.txt", model_dir);
     find_data_dir(model_dir, data_dir, MAX_PATHLEN);
 
     if (!WideCharToMultiByte(CP_UTF8, 0, model_onnx, -1, n_model, MAX_PATHLEN, NULL, NULL) ||
@@ -201,6 +214,14 @@ TtsEngine *TtsEngineAcquire(const wchar_t *model_dir, wchar_t *error, size_t err
     TtsEngine *e;
 
     TtsEngineInit();
+    /*
+     * init_lock serialises *loaders*, not generation.  Without it, two
+     * threads asking for different models at the same moment could pick the
+     * same free slot (the old code released `cs` before loading) and two
+     * threads asking for the same model could load it twice.  Synthesis is
+     * still serialised by `cs`, which this never holds across a load.
+     */
+    EnterCriticalSection(&g_cache.init_lock);
     EnterCriticalSection(&g_cache.cs);
 
     /* Reuse if already loaded - this is the whole point of the cache. */
@@ -209,7 +230,8 @@ TtsEngine *TtsEngineAcquire(const wchar_t *model_dir, wchar_t *error, size_t err
             _wcsicmp(g_cache.slots[i].model_dir, model_dir) == 0) {
             e = &g_cache.slots[i];
             e->last_used = ++g_tick;
-            return e;   /* lock still held: it serialises generation */
+            LeaveCriticalSection(&g_cache.init_lock);
+            return e;   /* `cs` stays held: it serialises generation */
         }
     }
 
@@ -224,17 +246,21 @@ TtsEngine *TtsEngineAcquire(const wchar_t *model_dir, wchar_t *error, size_t err
     }
     if (free_slot < 0) {
         LeaveCriticalSection(&g_cache.cs);
+        LeaveCriticalSection(&g_cache.init_lock);
         _snwprintf(error, errlen, L"too many models cached at once");
         return NULL;
     }
 
-    LeaveCriticalSection(&g_cache.cs);   /* loading is slow; do not block others */
+    LeaveCriticalSection(&g_cache.cs);   /* loading is slow; do not hold the table */
 
     {
         TtsEngine tmp;
         memset(&tmp, 0, sizeof(tmp));
         tmp.tts = create_engine(model_dir, 1.0f, &tmp.sample_rate, error, errlen);
-        if (!tmp.tts) return NULL;
+        if (!tmp.tts) {
+            LeaveCriticalSection(&g_cache.init_lock);
+            return NULL;   /* `cs` was already released above */
+        }
         wcscpy(tmp.model_dir, model_dir);
         tmp.last_used = ++g_tick;
         tmp.reference = 1;   /* protect the model we are about to hand out */
@@ -243,6 +269,7 @@ TtsEngine *TtsEngineAcquire(const wchar_t *model_dir, wchar_t *error, size_t err
         g_cache.slots[free_slot] = tmp;
         g_cache.count++;
         e = &g_cache.slots[free_slot];
+        LeaveCriticalSection(&g_cache.init_lock);   /* `cs` stays held */
     }
     return e;
 }
@@ -283,6 +310,43 @@ int TtsEngineIsLoaded(const wchar_t *model_dir) {
     return found;
 }
 
+int TtsEngineEvict(const wchar_t *model_dir) {
+    int i, evicted = 0;
+    if (!g_cache.ready || !model_dir || !*model_dir) return 0;
+    TtsEngineInit();
+    EnterCriticalSection(&g_cache.cs);
+    for (i = 0; i < MAX_CACHED_ENGINES; ++i) {
+        if (g_cache.slots[i].tts &&
+            _wcsicmp(g_cache.slots[i].model_dir, model_dir) == 0) {
+            SherpaOnnxDestroyOfflineTts(g_cache.slots[i].tts);
+            memset(&g_cache.slots[i], 0, sizeof(g_cache.slots[i]));
+            if (g_cache.count > 0) g_cache.count--;
+            evicted = 1;
+            break;
+        }
+    }
+    LeaveCriticalSection(&g_cache.cs);
+    return evicted;
+}
+
+int TtsEngineEvictOthers(const wchar_t *keep) {
+    int i, n = 0;
+    if (!g_cache.ready) return 0;
+    EnterCriticalSection(&g_cache.cs);
+    for (i = 0; i < MAX_CACHED_ENGINES; ++i) {
+        if (!g_cache.slots[i].tts) continue;
+        if (keep && *keep && _wcsicmp(g_cache.slots[i].model_dir, keep) == 0) {
+            continue;
+        }
+        SherpaOnnxDestroyOfflineTts(g_cache.slots[i].tts);
+        memset(&g_cache.slots[i], 0, sizeof(g_cache.slots[i]));
+        if (g_cache.count > 0) g_cache.count--;
+        n++;
+    }
+    LeaveCriticalSection(&g_cache.cs);
+    return n;
+}
+
 int TtsEngineSampleRate(const wchar_t *model_dir) {
     int i, rate = 0;
     if (!g_cache.ready) return 0;
@@ -313,6 +377,7 @@ typedef struct {
 static int32_t WINAPI engine_on_samples(const float *samples, int32_t n,
                                         float progress, void *arg) {
     GenCtx *ctx = (GenCtx *)arg;
+    if (InterlockedCompareExchange(&g_cancel, 0, 0)) return 0;  /* stop now */
     if (ctx) {
         ctx->called = 1;
         if (ctx->sink) ctx->sink(samples, (int)n, progress, ctx->user);
@@ -325,13 +390,14 @@ int TtsEngineGenerate(TtsEngine *engine, const char *text, float speed, int sid,
                       char *err, size_t errlen) {
     SherpaOnnxGenerationConfig cfg;
     const SherpaOnnxGeneratedAudio *audio;
-    GenCtx ctx;
+    GenCtx ctx = { 0, 0, 0 };
     int rc = 0;
 
     if (!engine || !engine->tts) {
         snprintf(err, errlen, "engine is not loaded");
         return 0;
     }
+    InterlockedExchange(&g_cancel, 0);
     memset(&cfg, 0, sizeof(cfg));
     cfg.sid = sid;
     cfg.speed = speed;
@@ -343,6 +409,11 @@ int TtsEngineGenerate(TtsEngine *engine, const char *text, float speed, int sid,
 
     audio = SherpaOnnxOfflineTtsGenerateWithConfig(engine->tts, text, &cfg,
                                                   engine_on_samples, &ctx);
+    if (InterlockedCompareExchange(&g_cancel, 0, 0)) {
+        snprintf(err, errlen, "cancelled");
+        if (audio) SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
+        return 0;
+    }
     if (!audio || audio->n <= 0) {
         snprintf(err, errlen, "the model produced no audio for this text");
         if (audio) SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);

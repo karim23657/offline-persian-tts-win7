@@ -5,106 +5,221 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>win7-tts</title>
 <style>
+  /* The Persian font is embedded as base64 (substituted by embed_ui.py), so
+     the page renders correctly on a Windows 7 machine with no fonts installed
+     and needs no extra HTTP request. */
+  @font-face {
+    font-family: "Sahel";
+    src: url(data:font/ttf;base64,__SAHEL_B64__) format("truetype");
+    font-display: swap;
+  }
   :root {
-    --bg: #10151c; --panel: #182130; --line: #2a3548;
-    --fg: #e8edf4; --muted: #9aa8bd; --accent: #4da3ff; --ok: #3ecf8e; --err: #ef6461;
+    --bg: #0e141c; --panel: #171f2b; --panel2: #1d2735; --line: #2a3548;
+    --fg: #e8edf4; --muted: #9aa8bd; --accent: #4da3ff; --accent2: #7c5cff;
+    --ok: #3ecf8e; --err: #ef6461; --radius: 12px;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--fg);
-         font: 15px/1.6 "Segoe UI", Tahoma, sans-serif; }
-  header { padding: 14px 20px; border-bottom: 1px solid var(--line);
-           display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
-  header h1 { margin: 0; font-size: 18px; font-weight: 600; }
-  header .sub { color: var(--muted); font-size: 13px; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background:
+      radial-gradient(1200px 500px at 80% -10%, #1a2540 0%, transparent 60%),
+      radial-gradient(900px 400px at 10% 110%, #14283a 0%, transparent 55%),
+      var(--bg);
+    color: var(--fg);
+    font: 15px/1.65 "Sahel", "Segoe UI", Tahoma, sans-serif;
+    min-height: 100%;
+    display: flex; flex-direction: column;
+  }
+  header {
+    padding: 14px 22px; border-bottom: 1px solid var(--line);
+    background: rgba(14, 20, 28, .75); backdrop-filter: blur(6px);
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    position: sticky; top: 0; z-index: 5;
+  }
+  header .brand { font-size: 18px; font-weight: 700; letter-spacing: .2px; }
+  header .brand .sub { color: var(--muted); font-size: 13px; font-weight: 400; margin-inline-start: 8px; }
   header .spacer { flex: 1; }
-  main { max-width: 900px; margin: 0 auto; padding: 20px; }
-  .card { background: var(--panel); border: 1px solid var(--line);
-          border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .pill {
+    background: var(--panel2); border: 1px solid var(--line);
+    color: var(--muted); border-radius: 999px; padding: 3px 12px;
+    font-size: 12.5px; white-space: nowrap;
+  }
+  .pill.ok { color: var(--ok); border-color: #245c44; }
+  .pill.err { color: var(--err); border-color: #6b2f2f; }
+  .lang-btn {
+    background: var(--panel2); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 6px 14px; font: inherit; font-size: 13px; cursor: pointer;
+  }
+  .lang-btn:hover { border-color: var(--accent); }
+
+  main { width: min(960px, 100%); margin: 0 auto; padding: 22px 16px 40px; flex: 1; }
+  .card {
+    background: linear-gradient(180deg, var(--panel) 0%, #151d29 100%);
+    border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 18px; margin-bottom: 18px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .25);
+  }
+  .card h2 {
+    margin: 0 0 12px; font-size: 15.5px; font-weight: 600;
+    display: flex; align-items: center; gap: 8px; color: #dfe7f2;
+  }
+  .card h2 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); display: inline-block; }
   label { display: block; color: var(--muted); font-size: 13px; margin-bottom: 6px; }
-  select, textarea, button, input[type=range] { font-family: inherit; font-size: 15px; }
-  select, textarea { width: 100%; background: #0e141d; color: var(--fg);
-                     border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
-  textarea { min-height: 150px; resize: vertical; line-height: 1.9; }
-  select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-  .row { display: flex; gap: 16px; flex-wrap: wrap; }
-  .row > div { flex: 1 1 220px; }
-  .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
-  button { background: #223047; color: var(--fg); border: 1px solid var(--line);
-           border-radius: 8px; padding: 10px 18px; cursor: pointer; }
-  button:hover:not(:disabled) { border-color: var(--accent); }
-  button:disabled { opacity: .45; cursor: default; }
-  button.primary { background: var(--accent); color: #06121f;
-                   border-color: var(--accent); font-weight: 600; }
-  audio { width: 100%; margin-top: 12px; }
-  .status { margin-top: 12px; font-size: 13px; color: var(--muted); min-height: 20px; }
+  textarea, select {
+    width: 100%; background: #101720; color: var(--fg);
+    border: 1px solid var(--line); border-radius: 9px;
+    padding: 10px 12px; font: inherit; outline: none;
+  }
+  textarea { resize: vertical; min-height: 96px; line-height: 1.8; }
+  textarea:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(77, 163, 255, .15); }
+  .row { display: flex; gap: 12px; margin-top: 12px; align-items: flex-end; flex-wrap: wrap; }
+  .field { min-width: 150px; }
+  .field.grow { flex: 1; }
+  button.primary {
+    width: 100%; border: 0; cursor: pointer; font: inherit; font-weight: 600;
+    background: linear-gradient(180deg, var(--accent) 0%, #2f7fd6 100%);
+    color: #fff; border-radius: 9px; padding: 11px 18px;
+    box-shadow: 0 4px 14px rgba(77, 163, 255, .28);
+    transition: transform .06s ease, filter .15s ease;
+  }
+  button.primary:hover { filter: brightness(1.08); }
+  button.primary:active { transform: translateY(1px); }
+  button.primary:disabled { filter: grayscale(.7) brightness(.75); cursor: not-allowed; }
+
+  .prog { display: none; height: 6px; border-radius: 6px; background: #101720; margin-top: 14px; overflow: hidden; }
+  .prog.on { display: block; }
+  .prog #progbar {
+    height: 100%; width: 40%; border-radius: 6px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    animation: slide 1.1s ease-in-out infinite;
+  }
+  @keyframes slide { 0% { transform: translateX(-120%); } 100% { transform: translateX(320%); } }
+  html[dir="rtl"] .prog #progbar { animation-name: slide-rtl; }
+  @keyframes slide-rtl { 0% { transform: translateX(120%); } 100% { transform: translateX(-320%); } }
+
+  .status { margin-top: 10px; font-size: 13.5px; color: var(--muted); min-height: 20px; }
   .status.err { color: var(--err); }
   .status.ok { color: var(--ok); }
-  progress { width: 100%; height: 6px; }
-  .meta { display: flex; gap: 18px; color: var(--muted); font-size: 12px;
-          margin-top: 10px; flex-wrap: wrap; }
-  code { background: #0e141d; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
-  .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .player-wrap { margin-top: 14px; }
+  .player-wrap audio { width: 100%; }
+  .meta { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
+
+  ul.models { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+  ul.models li {
+    background: var(--panel2); border: 1px solid var(--line);
+    border-radius: 999px; padding: 5px 14px; font-size: 13px;
+    display: flex; align-items: center; gap: 8px; cursor: pointer;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  ul.models li:hover { border-color: var(--accent); }
+  ul.models li .badge { font-size: 11px; color: var(--ok); }
+  ul.models li .badge.off { color: var(--muted); }
+
+  .cat-group { border-top: 1px dashed var(--line); padding-top: 12px; margin-top: 12px; }
+  .cat-group:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
+  .cat-title { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+  .cat-desc { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+  .cat-file {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    font-size: 13.5px; padding: 6px 0;
+  }
+  .cat-file a { color: var(--accent); text-decoration: none; }
+  .cat-file a:hover { text-decoration: underline; }
+  .cat-size { color: var(--muted); font-size: 12.5px; }
+  .cat-installed { color: var(--ok); font-size: 12px; border: 1px solid #245c44; border-radius: 999px; padding: 1px 9px; }
+
+  pre.api {
+    background: #0c1119; border: 1px solid var(--line); border-radius: 9px;
+    padding: 12px 14px; overflow-x: auto; font-size: 13px; line-height: 1.7;
+    direction: ltr; text-align: left; color: #cfe0f5;
+  }
+  footer {
+    text-align: center; color: var(--muted); font-size: 12.5px;
+    padding: 14px; border-top: 1px solid var(--line);
+  }
+  .hidden { display: none !important; }
+  @media (max-width: 640px) {
+    .row { flex-direction: column; align-items: stretch; }
+    .field { min-width: 0; }
+  }
 </style>
 </head>
 <body>
 <header>
-  <h1>win7-tts</h1>
-  <span class="sub">local text to speech</span>
-  <span class="spacer"></span>
-  <span class="sub" id="health">connecting...</span>
+  <div class="brand">🗣️ win7-tts<span class="sub" data-i18n="tagline">گفتار فارسی، آفلاین و محلی</span></div>
+  <div class="spacer"></div>
+  <span id="health" class="pill" data-i18n="connecting">در حال اتصال…</span>
+  <button id="langBtn" class="lang-btn" type="button">English</button>
 </header>
 
 <main>
-  <div class="card">
+  <section class="card">
+    <h2><span class="dot"></span><span data-i18n="speak">ساخت گفتار</span></h2>
+    <label for="text" data-i18n="textlabel">متن فارسی</label>
+    <textarea id="text" dir="rtl" rows="4" spellcheck="false"
+      data-i18n-ph="textph">سلام! این یک آزمایش کوتاه از گفتار فارسی است.</textarea>
     <div class="row">
-      <div>
-        <label for="model">Model</label>
+      <div class="field grow">
+        <label for="model" data-i18n="model">مدل</label>
         <select id="model"></select>
       </div>
-      <div>
-        <label for="speed">Speed <span id="speedVal">1.00x</span></label>
-        <input type="range" id="speed" min="0.5" max="2" step="0.05" value="1" style="width:100%">
+      <div class="field">
+        <label for="speed" data-i18n="speed">سرعت گفتار</label>
+        <select id="speed">
+          <option value="0.7">0.7× (کند)</option>
+          <option value="0.85">0.85×</option>
+          <option value="1" selected>1.0×</option>
+          <option value="1.15">1.15×</option>
+          <option value="1.3">1.3×</option>
+          <option value="1.5">1.5× (سریع)</option>
+        </select>
       </div>
-      <div>
-        <label for="sid">Speaker id</label>
-        <select id="sid"><option>0</option></select>
+      <div class="field grow">
+        <button id="gen" class="primary" type="button" data-i18n="generate">ساخت صدا ▶</button>
       </div>
     </div>
-    <div style="margin-top:14px">
-      <label for="text">Text</label>
-      <textarea id="text" dir="rtl" placeholder="سلام دنیا! این یک آزمایش است."></textarea>
-      <div class="hint">Persian, English or any other script. The model is loaded once and stays warm.</div>
+    <div id="prog" class="prog"><div id="progbar"></div></div>
+    <div id="status" class="status" role="status"></div>
+    <div id="playerWrap" class="player-wrap hidden">
+      <audio id="player" controls preload="none"></audio>
+      <div id="meta" class="meta"></div>
     </div>
-    <div class="actions">
-      <button class="primary" id="go">Generate</button>
-      <button id="warm">Warm up model</button>
-      <button id="sample">Insert sample</button>
-      <span class="status" id="status"></span>
-    </div>
-    <progress id="bar" value="0" max="100" style="display:none"></progress>
-    <audio id="player" controls style="display:none"></audio>
-    <div class="meta" id="meta"></div>
-  </div>
+  </section>
 
-  <div class="card">
-    <div style="font-weight:600;margin-bottom:6px">API</div>
-    <div class="hint" style="margin-bottom:10px">
-      The same engine is available over HTTP, which is useful for scripting and
-      for other programs on this machine.
+  <section class="card">
+    <h2><span class="dot"></span><span data-i18n="installed">مدل‌های نصب‌شده</span></h2>
+    <ul id="installed" class="models"></ul>
+    <div class="status" id="installedHint" data-i18n="installedHint">
+      با تغییر مدل، مدل قبلی از حافظه آزاد می‌شود؛ هر مدل یک بار بارگذاری می‌شود و برای همهٔ ساخت‌ها می‌ماند.
     </div>
-    <div class="meta">
-      <span><code>GET /api/health</code></span>
-      <span><code>GET /api/models</code></span>
-      <span><code>POST /api/warmup</code></span>
-      <span><code>POST /api/synthesize</code></span>
-      <span><code>GET /api/synthesize?text=...&amp;model=...</code></span>
-    </div>
-    <div class="hint" style="margin-top:10px">
-      POST /api/synthesize takes JSON and returns audio/wav:
-      <code>{"text":"...","model":"...","speed":1.0,"sid":0,"length_scale":1.0}</code>
-    </div>
-  </div>
+  </section>
+
+  <section class="card">
+    <h2><span class="dot"></span><span data-i18n="catalog">مدل‌های قابل دانلود</span></h2>
+    <div id="catalog"><div class="status" data-i18n="loading">در حال بارگذاری…</div></div>
+  </section>
+
+  <section class="card">
+    <h2><span class="dot"></span>API</h2>
+    <p class="cat-desc" data-i18n="apidocs">
+      همهٔ مسیرها با یک اتصال HTTP/1.1 پایدار (keep-alive) سرو می‌شوند؛ مستندات کامل:
+      <code>/api/help</code>
+    </p>
+<pre class="api">GET  /api/health          status, uptime, resident models
+GET  /api/models          installed models [{name, loaded}]
+GET  /api/catalog         models.json (what you see above)
+GET  /api/dict            pronunciation dictionary (user.dict)
+POST /api/dict            {"word": "...", "repl": "..."} | {"word": "...", "delete": true}
+POST /api/warmup          {"model": "name"} -&gt; load now, report ms
+POST /api/unload          {} = free all | {"keep": "m"} = all but m | {"model": "m"}
+POST /api/synthesize      {"text": "...", "model": "name", "speed": 1.0, "sid": 0} -&gt; audio/wav
+GET  /api/synthesize?text=...   same, via query string (for &lt;audio src&gt;)
+GET  /api/help            this list as plain text</pre>
+  </section>
 </main>
+
+<footer>win7-tts · <span data-i18n="footer">کاملاً محلی — بدون اینترنت، بدون حساب کاربری</span></footer>
 <script src="app.js"></script>
 </body>
 </html>

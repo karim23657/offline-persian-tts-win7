@@ -3,8 +3,10 @@
  *
  * Scope is deliberately narrow: serve a handful of routes to 127.0.0.1, parse
  * a request line plus headers and a Content-Length body, and stream a response
- * back.  No keep-alive, no TLS, no CGI - none of that belongs on a loopback
- * helper that binds one port.
+ * back.  HTTP/1.1 persistent connections are supported (the caller loops on
+ * http_read_request until it returns != 1), bounded by the read timeout the
+ * caller installs - no TLS, no CGI, none of that belongs on a loopback helper
+ * that binds one port.
  *
  * It binds 127.0.0.1 by default.  Binding 0.0.0.0 is available via --host but
  * prints a warning: this endpoint has no authentication and can make the
@@ -27,11 +29,18 @@ typedef struct {
     char *body;          /* malloc'd; NUL terminated, NULL when empty */
     size_t body_len;
     int content_length;
+    int http11;          /* request line said HTTP/1.1 or newer */
+    int conn_close;      /* client sent "Connection: close" */
+    int conn_keep10;     /* client sent "Connection: keep-alive" on HTTP/1.0 */
 } HttpRequest;
 
 typedef struct {
     SOCKET sock;
     char peer[64];
+    int keep;            /* set from the request: reply with keep-alive */
+    char *pend;          /* bytes that arrived past the current request */
+    size_t pend_len;
+    size_t pend_cap;
 } HttpConn;
 
 /* Start listening. Returns the bound port, or 0 on failure (message printed). */
@@ -40,7 +49,9 @@ int http_listen(const char *host, int port, int *out_port);
 /* Accept one connection. Returns 0 when the listener is closed. */
 int http_accept(int listener, HttpConn *out);
 
-/* Read a full request. Returns 1 on success, 0 on clean close, -1 on error. */
+/* Read one request. Returns 1 on success, 0 on clean close/idle timeout,
+ * -1 on protocol error, 2 when the caller should answer 411 (POST without
+ * Content-Length), 3 when it should answer 413 (body too large). */
 int http_read_request(HttpConn *conn, HttpRequest *req);
 
 void http_free_request(HttpRequest *req);

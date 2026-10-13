@@ -18,6 +18,7 @@
  * once and can synthesise many sentences from one invocation.
  *
  * Usage:
+ *   say.exe --text "سلام دنیا"                      auto model -> out.wav
  *   say.exe --model <dir> --out <file.wav> --text "ascii"
  *   say.exe --model <dir> --out <file.wav> --text-file <utf8.txt>
  *   say.exe --model <dir> --out <dir>  --text-file lines.txt --split
@@ -26,18 +27,28 @@
  * one .wav is written per line, named <n>_<out>.wav next to --out.
  *
  * Options:
- *   --speed <float>     speech rate, 1.0 is normal (default 1.0)
- *   --sid <int>         speaker id for multi-speaker models (default 0)
- *   --threads <int>     backend threads (default 2)
- *   --scale <float>     VITS length scale, >1 is slower (default 1.0)
+ *   --model <dir>      model folder (default: auto-detected in models\)
+ *   --out <file>       output file (default out.wav)
+ *   --speed <float>    speech rate, 1.0 is normal (default 1.0)
+ *   --sid <int>        speaker id for multi-speaker models (default 0)
+ *   --threads <int>    backend threads (default 2)
+ *   --scale <float>    VITS length scale, >1 is slower (default 1.0)
+ *   --play             play the result through the sound device
+ *   --no-dict          do not apply user.dict (pronunciation substitutions)
+ *   --list-models      list the installed models and exit
+ *   -h, --help         full help        --version   print version and exit
  */
 
 #include <windows.h>
+#include <mmsystem.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "sherpa-onnx/c-api/c-api.h"
+#include "dict.h"
+
+#define SAY_VERSION "1.1.0"
 
 /*
  * Turn a hard crash into a readable explanation.
@@ -151,10 +162,132 @@ static void join_path(char *out, size_t cap, const char *dir, const char *name) 
     }
 }
 
+/* A path under the package root (one level above the executable's folder). */
+static void pkg_path(char *out, size_t cap, const char *name) {
+    char exe[MAX_PATH_LEN];
+    char *slash;
+    GetModuleFileNameA(NULL, exe, MAX_PATH_LEN);
+    slash = strrchr(exe, '\\');
+    if (slash) *slash = '\0';
+    snprintf(out, cap, "%s\\..\\%s", exe, name);
+}
+
+/* A folder counts as an installed model when it has both an .onnx and tokens. */
+static int model_ok(const char *dir) {
+    char probe[MAX_PATH_LEN];
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    int has_onnx = 0;
+
+    snprintf(probe, sizeof(probe), "%s\\tokens.txt", dir);
+    if (GetFileAttributesA(probe) == INVALID_FILE_ATTRIBUTES) return 0;
+    snprintf(probe, sizeof(probe), "%s\\*.onnx", dir);
+    h = FindFirstFileA(probe, &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) { has_onnx = 1; break; }
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    return has_onnx;
+}
+
+/* Prefer the well-known default model, else the first valid one. */
+static int find_default_model(char *out, size_t cap) {
+    char models[MAX_PATH_LEN], pattern[MAX_PATH_LEN], first[MAX_PATH_LEN];
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    int have_first = 0;
+
+    pkg_path(models, sizeof(models), "models");
+    snprintf(pattern, sizeof(pattern), "%s\\vits-piper-fa_IR-gyro-medium", models);
+    if (model_ok(pattern)) {
+        snprintf(out, cap, "%s", pattern);
+        return 1;
+    }
+    snprintf(pattern, sizeof(pattern), "%s\\*", models);
+    h = FindFirstFileA(pattern, &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            char dir[MAX_PATH_LEN];
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+            snprintf(dir, sizeof(dir), "%s\\%s", models, fd.cFileName);
+            if (!model_ok(dir)) continue;
+            if (!have_first) {
+                snprintf(first, sizeof(first), "%s", dir);
+                have_first = 1;
+            }
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    if (have_first) {
+        snprintf(out, cap, "%s", first);
+        return 1;
+    }
+    return 0;
+}
+
+/* --list-models: one line per installed model, incomplete folders flagged. */
+static int list_models(void) {
+    char models[MAX_PATH_LEN], pattern[MAX_PATH_LEN];
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    int n = 0;
+
+    pkg_path(models, sizeof(models), "models");
+    printf("models in %s:\n", models);
+    snprintf(pattern, sizeof(pattern), "%s\\*", models);
+    h = FindFirstFileA(pattern, &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            char dir[MAX_PATH_LEN];
+            int ok;
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+            snprintf(dir, sizeof(dir), "%s\\%s", models, fd.cFileName);
+            ok = model_ok(dir);
+            printf("  %s%-46s%s\n", ok ? "" : "[incomplete] ", fd.cFileName,
+                   ok ? "  (ready)" : "");
+            if (ok) n++;
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    if (!n) printf("  (none - run scripts\\get_model.cmd gyro)\n");
+    printf("%d model(s) ready\n", n);
+    return n;
+}
+
+static void usage(FILE *f) {
+    fprintf(f,
+            "say.exe " SAY_VERSION " - fast local Persian TTS for Windows 7\n"
+            "\n"
+            "usage: say.exe [options] (--text <text> | --text-file <file>)\n"
+            "\n"
+            "  --model <dir>     model folder (default: auto-detect in models\\)\n"
+            "  --out <file.wav>  output file (default out.wav)\n"
+            "  --text <text>     text to speak (any script, console code page OK)\n"
+            "  --text-file <f>   read UTF-8 text from a file\n"
+            "  --split           write one wav per line of --text-file\n"
+            "  --speed <f>       speech rate, 1.0 is normal (default 1.0)\n"
+            "  --sid <int>       speaker id for multi-speaker models (default 0)\n"
+            "  --threads <int>   backend threads (default 2)\n"
+            "  --scale <f>       VITS length scale, >1 is slower (default 1.0)\n"
+            "  --play            play the result after writing it\n"
+            "  --no-dict         do not apply user.dict pronunciation entries\n"
+            "  --list-models     list installed models and exit\n"
+            "  -h, --help        this help\n"
+            "  --version         print version and exit\n"
+            "\n"
+            "The model is loaded once per invocation and reused for every\n"
+            "sentence, so --split on a long file runs at full speed.\n");
+}
+
 int main(int argc, char **argv) {
     const char *model_dir = NULL, *out_path = NULL, *text_arg = NULL, *text_file = NULL;
     float speed = 1.0f, length_scale = 1.0f;
     int sid = 0, num_threads = 2, split = 0;
+    int use_dict = 1, do_play = 0;
     int i;
     char *owned = NULL;
     SherpaOnnxOfflineTtsVitsModelConfig vits;
@@ -176,19 +309,37 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--threads") && i + 1 < argc) num_threads = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) length_scale = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--split")) split = 1;
-        else {
-            fprintf(stderr, "say: unknown option '%s'\n", argv[i]);
+        else if (!strcmp(argv[i], "--play")) do_play = 1;
+        else if (!strcmp(argv[i], "--no-dict")) use_dict = 0;
+        else if (!strcmp(argv[i], "--list-models")) { list_models(); return 0; }
+        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
+            usage(stdout);
+            return 0;
+        } else if (!strcmp(argv[i], "--version")) {
+            printf("win7-tts say " SAY_VERSION "\n");
+            return 0;
+        } else {
+            fprintf(stderr, "say: unknown option '%s'\n\n", argv[i]);
+            usage(stderr);
             return 1;
         }
     }
 
-    if (!model_dir || !out_path || (!text_arg && !text_file)) {
-        fprintf(stderr,
-                "usage: say.exe --model <dir> --out <file.wav> "
-                "(--text <text> | --text-file <file.txt>)\n"
-                "       add --split to treat each line of the file as a sentence\n");
+    if (!text_arg && !text_file) {
+        usage(stderr);
         return 1;
     }
+    if (!model_dir) {
+        static char auto_dir[MAX_PATH_LEN];
+        if (!find_default_model(auto_dir, sizeof(auto_dir))) {
+            fprintf(stderr,
+                    "say: no model installed - run scripts\\get_model.cmd gyro\n");
+            return 1;
+        }
+        model_dir = auto_dir;
+        fprintf(stderr, "Model: %s (auto)\n", model_dir);
+    }
+    if (!out_path) out_path = "out.wav";
     if (num_threads < 1) num_threads = 1;
 
     SetUnhandledExceptionFilter((LPTOP_LEVEL_EXCEPTION_FILTER)crash_handler);
@@ -227,12 +378,19 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* espeak-ng-data lives beside the model unless the model ships its own. */
+    /* espeak-ng-data lives beside the model unless the model ships its own;
+       otherwise fall back to the package folder (models\espeak-ng-data), and
+       only then to the current directory - running say.exe from another folder
+       used to lose the phonemiser data entirely. */
     snprintf(probe, sizeof(probe), "%s\\espeak-ng-data\\phontab", model_dir);
     if (GetFileAttributesA(probe) != INVALID_FILE_ATTRIBUTES) {
         snprintf(data_dir, sizeof(data_dir), "%s\\espeak-ng-data", model_dir);
     } else {
-        strcpy(data_dir, "espeak-ng-data");
+        pkg_path(data_dir, sizeof(data_dir), "models\\espeak-ng-data");
+        snprintf(probe, sizeof(probe), "%s\\phontab", data_dir);
+        if (GetFileAttributesA(probe) == INVALID_FILE_ATTRIBUTES) {
+            strcpy(data_dir, "espeak-ng-data");
+        }
     }
 
     /* ---- build the engine ------------------------------------------------ */
@@ -321,6 +479,27 @@ int main(int argc, char **argv) {
         }
         if (!*text) die("the text to speak is empty");
 
+        /* Pronunciation dictionary: same user.dict the GUI and server use. */
+        if (use_dict) {
+            char dpath[MAX_PATH_LEN];
+            pkg_path(dpath, sizeof(dpath), "user.dict");
+            if (DictLoadA(dpath) == 0 && DictCount() > 0) {
+                size_t cap = strlen(text) + 1024;
+                char *tmp = (char *)malloc(cap);
+                if (tmp) {
+                    snprintf(tmp, cap, "%s", text);
+                    if (DictApply(tmp, cap) > 0) {
+                        free(owned);
+                        owned = tmp;
+                        text = owned;
+                        fprintf(stderr, "Applied user.dict\n");
+                    } else {
+                        free(tmp);
+                    }
+                }
+            }
+        }
+
         {
             const SherpaOnnxGeneratedAudio *audio =
                 SherpaOnnxOfflineTtsGenerateWithConfig(tts, text, &gen_cfg, NULL, NULL);
@@ -345,18 +524,31 @@ int main(int argc, char **argv) {
         char *text = read_file(text_file ? text_file : "");
         char *line, *save;
         int n = 0;
+        char dictbuf[65536];
         if (!text) die("cannot read the text file");
         trim_utf8(text);
+        if (use_dict) {
+            char dpath[MAX_PATH_LEN];
+            pkg_path(dpath, sizeof(dpath), "user.dict");
+            if (DictLoadA(dpath) != 0) DictClear();
+        }
         for (line = strtok_r(text, "\r\n", &save); line;
              line = strtok_r(NULL, "\r\n", &save)) {
             char one[MAX_PATH_LEN];
             char written[MAX_PATH_LEN];
             char stem[MAX_PATH_LEN];
             const SherpaOnnxGeneratedAudio *audio;
+            const char *speaking;
             char *t = trim_utf8(line);
             n++;
             if (!*t) continue;
-            audio = SherpaOnnxOfflineTtsGenerateWithConfig(tts, t, &gen_cfg, NULL, NULL);
+            speaking = t;
+            if (use_dict && DictCount() > 0) {
+                snprintf(dictbuf, sizeof(dictbuf), "%s", t);
+                if (DictApply(dictbuf, sizeof(dictbuf)) > 0) speaking = dictbuf;
+            }
+            audio = SherpaOnnxOfflineTtsGenerateWithConfig(tts, speaking, &gen_cfg,
+                                                           NULL, NULL);
             if (!audio || audio->n <= 0) {
                 fprintf(stderr, "  line %d: FAILED to generate\n", n);
                 failures++;
@@ -385,6 +577,22 @@ int main(int argc, char **argv) {
     }
 
     SherpaOnnxDestroyOfflineTts(tts);
+
+    /* --play: the file we just wrote, on the system sound device. */
+    if (do_play && made > 0 && !split) {
+        int wlen = MultiByteToWideChar(CP_ACP, 0, out_path, -1, NULL, 0);
+        if (wlen > 0) {
+            wchar_t *wout = (wchar_t *)malloc((size_t)wlen * sizeof(wchar_t));
+            if (wout) {
+                MultiByteToWideChar(CP_ACP, 0, out_path, -1, wout, wlen);
+                fprintf(stderr, "Playing %s...\n", out_path);
+                if (!PlaySoundW(wout, NULL, SND_FILENAME | SND_SYNC)) {
+                    fprintf(stderr, "say: could not play the file\n");
+                }
+                free(wout);
+            }
+        }
+    }
 
     if (made == 0 && failures == 0) fprintf(stderr, "say: nothing to do\n");
     return failures ? 1 : 0;

@@ -8,24 +8,32 @@ Emitting the HTML as a C array keeps tts_server.exe a single self-contained
 file: no data folder to lose, and nothing to get out of step with the binary.
 Index.html and app.js are kept as real files so they stay editable and
 lintable.
+
+The index.html may contain the placeholder __SAHEL_B64__; it is replaced here
+with base64 of sahel.ttf at the repository root, so the browser gets the
+Persian font from the page itself (no extra route, no font installed on the
+machine needed).
 """
 
+import base64
 import os
 import sys
 
 
-def emit(path, name):
-    with open(path, "rb") as fh:
-        data = fh.read()
+def emit_bytes(data, sym, comment):
     lines = []
-    lines.append("/* Generated from %s by embed_ui.py - do not edit. */\n"
-                 % os.path.basename(path))
-    lines.append("static const char %s[] = {\n" % name)
+    lines.append("/* Generated from %s by embed_ui.py - do not edit. */\n" % comment)
+    lines.append("static const char %s[] = {\n" % sym)
     for i in range(0, len(data), 16):
         chunk = data[i:i + 16]
         lines.append("    " + ", ".join("0x%02x" % b for b in chunk) + ",\n")
     lines.append("    0x00\n};\n")
     return "".join(lines), len(data)
+
+
+def emit(path, name):
+    with open(path, "rb") as fh:
+        return emit_bytes(fh.read(), name, os.path.basename(path))
 
 
 def main():
@@ -34,10 +42,28 @@ def main():
         return 2
     srcdir, out = sys.argv[1:3]
 
+    # Splice the font into the HTML before emitting it.
+    html_path = os.path.join(srcdir, "index.html")
+    with open(html_path, "rb") as fh:
+        html = fh.read()
+    if b"__SAHEL_B64__" in html:
+        font_path = os.path.join(srcdir, "..", "..", "..", "sahel.ttf")
+        if os.path.exists(font_path):
+            with open(font_path, "rb") as fh:
+                b64 = base64.b64encode(fh.read())
+            html = html.replace(b"__SAHEL_B64__", b64)
+        else:
+            sys.stderr.write(
+                "warning: %s not found; the UI falls back to system fonts\n"
+                % font_path)
+            html = html.replace(b"__SAHEL_B64__", b"")
+
     parts = []
     lengths = []
-    for fname, sym in (("index.html", "win7_tts_ui_html"),
-                       ("app.js", "win7_tts_ui_app_js")):
+    text, n = emit_bytes(html, "win7_tts_ui_html", "index.html")
+    parts.append(text)
+    lengths.append(("win7_tts_ui_html", n))
+    for fname, sym in (("app.js", "win7_tts_ui_app_js"),):
         path = os.path.join(srcdir, fname)
         text, n = emit(path, sym)
         parts.append(text)

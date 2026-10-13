@@ -1,0 +1,189 @@
+{
+  "comment": "models.json - download catalog for win7-tts. One object per downloadable file; dir is relative to the program folder, kind is file (plain download) or archive (tar.bz2, extracted with tar after download). Edit freely.",
+  "items": [
+    {
+      "name": "vits-piper-fa_IR-gyro-medium.tar.bz2",
+      "dir": "models",
+      "kind": "archive",
+      "size": 67183308,
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-fa_IR-gyro-medium.tar.bz2",
+      "desc": "مدل پیش‌فرض فارسی — بهترین کیفیت (کرونایی)"
+    },
+    {
+      "name": "vits-piper-fa_IR-amir-medium.tar.bz2",
+      "dir": "models",
+      "kind": "archive",
+      "size": 67180373,
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-fa_IR-amir-medium.tar.bz2",
+      "desc": "صدای مرد فارسی — کیفیت عالی"
+    },
+    {
+      "name": "vits-piper-fa_en-rezahedayatfar-ibrahimwalk-medium.tar.bz2",
+      "dir": "models",
+      "kind": "archive",
+      "size": 67246929,
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-fa_en-rezahedayatfar-ibrahimwalk-medium.tar.bz2",
+      "desc": "صدای دوزبانه فارسی/انگلیسی"
+    },
+    {
+      "name": "vits-mimic3-fa-haaniye_low.tar.bz2",
+      "dir": "models",
+      "kind": "archive",
+      "size": 67093314,
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-mimic3-fa-haaniye_low.tar.bz2",
+      "desc": "صدای زن فارسی — حجم کم و سریع"
+    },
+    {
+      "name": "model.onnx",
+      "dir": "models/vits-piper-fa-ganji",
+      "kind": "file",
+      "size": 63516173,
+      "url": "https://huggingface.co/karim23657/persian-tts-vits/resolve/main/vits-piper-fa-ganji/model.onnx",
+      "desc": "صدای گنجی — سریع و سبک"
+    },
+    {
+      "name": "tokens.txt",
+      "dir": "models/vits-piper-fa-ganji",
+      "kind": "file",
+      "size": 940,
+      "url": "https://huggingface.co/karim23657/persian-tts-vits/resolve/main/vits-piper-fa-ganji/tokens.txt",
+      "desc": "صدای گنجی — سریع و سبک"
+    },
+    {
+      "name": "model.onnx",
+      "dir": "models/vits-piper-fa-ganji-adabi",
+      "kind": "file",
+      "size": 63516173,
+      "url": "https://huggingface.co/karim23657/persian-tts-vits/resolve/main/vits-piper-fa-ganji-adabi/model.onnx",
+      "desc": "صدای گنجی (ادبی)"
+    },
+    {
+      "name": "tokens.txt",
+      "dir": "models/vits-piper-fa-ganji-adabi",
+      "kind": "file",
+      "size": 940,
+      "url": "https://huggingface.co/karim23657/persian-tts-vits/resolve/main/vits-piper-fa-ganji-adabi/tokens.txt",
+      "desc": "صدای گنجی (ادبی)"
+    },
+    {
+      "name": "model.onnx",
+      "dir": "models/female-female-coqui-vits",
+      "kind": "file",
+      "size": 114309224,
+      "url": "https://huggingface.co/karim23657/persian-tts-vits/resolve/main/female-female-coqui-vits/model.onnx",
+      "desc": "صدای زن (نگو)"
+    },
+    {
+      "name": "tokens.txt",
+      "dir": "models/female-female-coqui-vits",
+      "kind": "file",
+      "size": 877,
+      "url": "https://huggingface.co/karim23657/persian-tts-vits/resolve/main/female-female-coqui-vits/tokens.txt",
+      "desc": "صدای زن (نگو)"
+    },
+    {
+      "name": "model.onnx",
+      "dir": "models/persian-tts-male1-vits-coqui",
+      "kind": "file",
+      "size": 114309427,
+      "url": "https://huggingface.co/karim23657/persian-tts-vits/resolve/main/persian-tts-male1-vits-coqui/model.onnx",
+      "desc": "صدای مرد (آرش)"
+    },
+    {
+      "name": "tokens.txt",
+      "dir": "models/persian-tts-male1-vits-coqui",
+      "kind": "file",
+      "size": 877,
+      "url": "https://huggingface.co/karim23657/persian-tts-vits/resolve/main/persian-tts-male1-vits-coqui/tokens.txt",
+      "desc": "صدای مرد (آرش)"
+    },
+    {
+      "name": "model.onnx",
+      "dir": "models/male-male-coqui-vits",
+      "kind": "file",
+      "size": 114309224,
+      "url": "https://huggingface.co/karim23657/persian-tts-vits/resolve/main/male-male-coqui-vits/model.onnx",
+      "desc": "صدای مرد (کیان)"
+    },
+    {
+      "name": "tokens.txt",
+      "dir": "models/male-male-coqui-vits",
+      "kind": "file",
+      "size": 877,
+      "url": "https://huggingface.co/karim23657/persian-tts-vits/resolve/main/male-male-coqui-vits/tokens.txt",
+      "desc": "صدای مرد (کیان)"
+    },
+    {
+      "name": "model.onnx",
+      "dir": "models/persian-tts-female1-vits-coqui",
+      "kind": "file",
+      "size": 114309224,
+      "url": "https://huggingface.co/karim23657/persian-tts-vits/resolve/main/persian-tts-female1-vits-coqui/model.onnx",
+      "desc": "صدای زن (م distort)"
+    },
+    {
+      "name": "tokens.txt",
+      "dir": "models/persian-tts-female1-vits-coqui",
+      "kind": "file",
+      "size": 877,
+      "url": "https://huggingface.co/karim23657/persian-tts-vits/resolve/main/persian-tts-female1-vits-coqui/tokens.txt",
+      "desc": "صدای زن (م distort)"
+    },
+    {
+      "name": "model.onnx",
+      "dir": "models/female-GPTInformal-coqui-vits",
+      "kind": "file",
+      "size": 114309224,
+      "url": "https://huggingface.co/karim23657/persian-tts-vits/resolve/main/female-GPTInformal-coqui-vits/model.onnx",
+      "desc": "صدای زن (شیوا)"
+    },
+    {
+      "name": "tokens.txt",
+      "dir": "models/female-GPTInformal-coqui-vits",
+      "kind": "file",
+      "size": 877,
+      "url": "https://huggingface.co/karim23657/persian-tts-vits/resolve/main/female-GPTInformal-coqui-vits/tokens.txt",
+      "desc": "صدای زن (شیوا)"
+    },
+    {
+      "name": "model.onnx",
+      "dir": "models/male-SmartGitiCorp-coqui-vits",
+      "kind": "file",
+      "size": 114309224,
+      "url": "https://huggingface.co/karim23657/persian-tts-vits/resolve/main/male-SmartGitiCorp-coqui-vits/model.onnx",
+      "desc": "صدای مرد (بهمن)"
+    },
+    {
+      "name": "tokens.txt",
+      "dir": "models/male-SmartGitiCorp-coqui-vits",
+      "kind": "file",
+      "size": 877,
+      "url": "https://huggingface.co/karim23657/persian-tts-vits/resolve/main/male-SmartGitiCorp-coqui-vits/tokens.txt",
+      "desc": "صدای مرد (بهمن)"
+    },
+    {
+      "name": "model.onnx",
+      "dir": "models/mms-fa",
+      "kind": "file",
+      "size": 114021636,
+      "url": "https://huggingface.co/willwade/mms-tts-multilingual-models-onnx/resolve/main/fas/model.onnx",
+      "desc": "چندزبانه (۱۰۰۰+ زبان)"
+    },
+    {
+      "name": "tokens.txt",
+      "dir": "models/mms-fa",
+      "kind": "file",
+      "size": 250,
+      "url": "https://huggingface.co/willwade/mms-tts-multilingual-models-onnx/resolve/main/fas/tokens.txt",
+      "desc": "چندزبانه (۱۰۰۰+ زبان)"
+    },
+    {
+      "name": "espeak-ng-data.tar.bz2",
+      "dir": "models",
+      "kind": "archive",
+      "size": 7252012,
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/espeak-ng-data.tar.bz2",
+      "desc": "دادهٔ آواشنسی مشترک (برای همهٔ مدل‌ها لازم است)"
+    }
+  ]
+}

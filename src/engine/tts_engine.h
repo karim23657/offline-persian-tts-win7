@@ -64,6 +64,22 @@ int TtsEngineIsLoaded(const wchar_t *model_dir);
 int TtsEngineSampleRate(const wchar_t *model_dir);
 
 /*
+ * Offload one resident model (frees the ONNX session and its arenas).
+ * Returns 1 when it was resident.  This is the "switching models" half of the
+ * cache policy: the selected model is loaded once and serves many
+ * generations, and selecting a *different* model unloads the previous one so
+ * two 63 MB sessions never sit in memory together unless the LRU allows it.
+ */
+int TtsEngineEvict(const wchar_t *model_dir);
+
+/*
+ * Offload every resident model except `keep` (NULL or empty = all of them).
+ * Returns the number unloaded.  POST /api/unload uses this; the web UI calls
+ * it on pagehide so closing the window gives the memory back.
+ */
+int TtsEngineEvictOthers(const wchar_t *keep);
+
+/*
  * Sink for generated samples, so callers (e.g. the WAV writer) can consume
  * audio as it is produced instead of only at the end.  Deliberately mirrors
  * the engine's own progress callback - samples, count, progress, user - so the
@@ -80,6 +96,11 @@ typedef void (*TtsSampleSink)(const float *samples, int count, float progress,
 int TtsEngineGenerate(TtsEngine *engine, const char *text, float speed, int sid,
                       TtsSampleSink sink, void *user, int *out_samples,
                       char *err, size_t errlen);
+
+/* Best-effort abort of the generation running in another thread: the sample
+ * callback reports it to the engine, and the caller is told "cancelled" once
+ * Generate returns (even if the backend ignored the callback result). */
+void TtsEngineRequestCancel(void);
 
 #ifdef __cplusplus
 }

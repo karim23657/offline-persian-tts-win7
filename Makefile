@@ -25,7 +25,7 @@ SERPA_BINS := $(SHERPA)/bin/sherpa-onnx-offline-tts.exe \
 SHIM_SRC   := $(SRC)/shim/win7shim.c $(SRC)/shim/win7shim_fallback.c
 COMMON_LIBS:= -lkernel32 -static-libgcc
 CAPI_LIB   := -L$(RUNTIME) -lsherpa-onnx-c-api
-GUI_LIBS   := $(CAPI_LIB) -lcomctl32 -lwinmm -lshell32 -luuid -lole32
+GUI_LIBS   := $(CAPI_LIB) -lcomctl32 -lcomdlg32 -lwinmm -lshell32 -luuid -lole32 -lwininet
 
 .PHONY: all deps shim say gui diag server runtime test release upgrade clean distclean help FORCE
 
@@ -78,10 +78,10 @@ $(SRC)/shim/imports.txt: $(SHERPA)/.complete $(SRC)/shim/scan_imports.py \
 # ---------------------------------------------------------------- server
 SERVER_SRC := $(SRC)/server/tts_server.c $(SRC)/server/http_min.c \
                $(SRC)/server/json_min.c $(SRC)/server/wav_writer.c \
-               $(SRC)/engine/tts_engine.c
+               $(SRC)/engine/tts_engine.c $(SRC)/engine/dict.c
 
 $(BUILD)/server/ui_html.h: $(SRC)/server/ui/index.html $(SRC)/server/ui/app.js \
-                           $(SRC)/server/embed_ui.py
+                           $(SRC)/server/embed_ui.py $(wildcard sahel.ttf)
 	@mkdir -p $(BUILD)/server
 	@$(PY) $(SRC)/server/embed_ui.py $(SRC)/server/ui $@
 
@@ -96,16 +96,22 @@ $(RUNTIME)/tts_server.exe: $(SERVER_SRC) $(BUILD)/server/ui_html.h \
 server: $(RUNTIME)/tts_server.exe
 
 # ---------------------------------------------------------------- front ends
-$(RUNTIME)/say.exe: $(SRC)/say/say.c $(RUNTIME)/sherpa-onnx-c-api.dll
+$(RUNTIME)/say.exe: $(SRC)/say/say.c $(SRC)/engine/dict.c \
+                    $(RUNTIME)/sherpa-onnx-c-api.dll
 	@echo "==> compiling say.exe"
-	@$(CC) -O2 -Wall -o $@ $< -I$(SHERPA)/include $(CAPI_LIB)
+	@$(CC) -O2 -Wall -o $@ $(SRC)/say/say.c $(SRC)/engine/dict.c \
+	      -I$(SHERPA)/include -I$(SRC)/engine $(CAPI_LIB) -lwinmm
 
 say: $(RUNTIME)/say.exe
 
-$(RUNTIME)/tts_gui.exe: $(SRC)/gui/gui.c $(RUNTIME)/sherpa-onnx-c-api.dll
+$(RUNTIME)/tts_gui.exe: $(SRC)/gui/gui.c $(SRC)/engine/tts_engine.c \
+                        $(SRC)/engine/dict.c $(SRC)/server/json_min.c \
+                        $(RUNTIME)/sherpa-onnx-c-api.dll
 	@echo "==> compiling tts_gui.exe"
-	@$(CC) -O2 -Wall -mwindows -municode -o $@ $< $(SRC)/engine/tts_engine.c \
-	      -I$(SHERPA)/include -I$(SRC)/engine $(GUI_LIBS)
+	@$(CC) -O2 -Wall -mwindows -municode -o $@ $(SRC)/gui/gui.c \
+	      $(SRC)/engine/tts_engine.c $(SRC)/engine/dict.c \
+	      $(SRC)/server/json_min.c \
+	      -I$(SHERPA)/include -I$(SRC)/engine -I$(SRC)/server $(GUI_LIBS)
 
 gui: $(RUNTIME)/tts_gui.exe
 
@@ -194,21 +200,24 @@ test: $(BUILD)/shim/test_shim.exe $(TEST_SHIM) $(BUILD)/json_test.exe
 	@# tests above cannot see.
 	@echo "==> running HTTP API smoke test"
 	@$(PY) scripts/api_smoke_test.py --port $${API_TEST_PORT:-8799}
+	@# Protocol behaviour: keep-alive reuse, pipelining, unload/catalog/help/dict
+	@# endpoints, and the beacon the web UI sends when its window closes.
+	@echo "==> running HTTP protocol test"
+	@$(PY) scripts/protocol_test.py --port $${PROTO_TEST_PORT:-8801}
 
 # ---------------------------------------------------------------- release
+# Builds the release archives into dist/ via scripts/make_dist.py:
+#   win7-tts-<ver>-runtime.zip   program only      (small, fetch a model once)
+#   win7-tts-<ver>-models.zip    models only       (drop onto an existing copy)
+#   win7-tts-<ver>-full.zip      program + models  (works offline out of box)
+# plus SHA256SUMS.txt and the legacy win7-tts-runtime-only.zip name that the
+# bug-report template still references.  The models flavors are only
+# meaningful when models/ is populated, so make_dist.py skips them (with a
+# note) on a model-less checkout.
 release: runtime
 	@echo "==> packaging $(DIST)/"
-	@mkdir -p $(DIST)
-	@rm -f $(DIST)/*.zip
-	@rm -f $(DIST)/win7-tts.zip
-	@# Zip from the parent so the archive contains a single top-level
-	@# win7-tts/ folder and extracts tidily on Windows.
-	@cd .. && zip -r -q win7-tts/$(DIST)/win7-tts.zip win7-tts \
-	    -x 'win7-tts/build/*' 'win7-tts/.git/*' 'win7-tts/dist/*' \
-	       'win7-tts/runtime/*.wav' 'win7-tts/runtime/_diag_*' \
-	       '*__pycache__*'
-	@echo "  $(DIST)/win7-tts.zip"
-	@$(PY) scripts/make_slim_zip.py $(DIST)
+	@rm -rf $(DIST)
+	@$(PY) scripts/make_dist.py $(DIST)
 
 # ---------------------------------------------------------------- upgrade
 upgrade:
